@@ -98,7 +98,14 @@ folder with the artifact contents.
 node --test 'webapp/tests/*.test.mjs'
 ```
 
-The tests simulate two receivers with an LO offset, random LO phase,
+Browser test against two emulated receivers (Playwright with Chromium);
+with a directory argument it also writes the screenshots used above:
+
+```bash
+node webapp/tests/e2e/e2e.cjs [screenshot-dir]
+```
+
+The DSP tests simulate two receivers with an LO offset, random LO phase,
 fractional time offset, noise, a CW reference and a wideband target, and check
 that the known phase difference is recovered.
 
