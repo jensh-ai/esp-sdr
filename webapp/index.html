@@ -25,7 +25,12 @@
           <h2><span class="swatch a"></span>Receiver A</h2>
           <p class="device-status" id="status-A">Not connected</p>
           <div class="row">
+            <select id="iface-A" aria-label="Interface of receiver A">
+              <option value="webserial">Web Serial</option>
+              <option value="webusb">WebUSB</option>
+            </select>
             <button id="connect-A">Connect A</button>
+            <button id="choose-A" class="secondary" title="Ask the browser for another device">Other device…</button>
             <button id="disconnect-A" class="secondary" disabled>Disconnect</button>
           </div>
         </article>
@@ -33,11 +38,22 @@
           <h2><span class="swatch b"></span>Receiver B</h2>
           <p class="device-status" id="status-B">Not connected</p>
           <div class="row">
+            <select id="iface-B" aria-label="Interface of receiver B">
+              <option value="webserial">Web Serial</option>
+              <option value="webusb">WebUSB</option>
+            </select>
             <button id="connect-B">Connect B</button>
+            <button id="choose-B" class="secondary" title="Ask the browser for another device">Other device…</button>
             <button id="disconnect-B" class="secondary" disabled>Disconnect</button>
           </div>
         </article>
       </section>
+      <p class="hint devices-hint">
+        <button id="swap" class="secondary" title="Exchange the roles of the two connected receivers">Swap A ↔ B</button>
+        Connect reuses the device chosen last time without asking again. WebUSB recognizes each board by its USB
+        serial number; Web Serial cannot tell two identical boards apart, so check the roles (A drives the trigger
+        line).
+      </p>
 
       <section class="panel" aria-labelledby="capture-heading">
         <h2 id="capture-heading">Capture</h2>
@@ -160,7 +176,7 @@
       Based on <a href="https://github.com/ESPARGOS/esp-sdr" target="_blank" rel="noopener noreferrer">ESPARGOS esp-sdr</a>
       and
       <a href="https://github.com/ESPARGOS/esp-web-sdr" target="_blank" rel="noopener noreferrer">esp-web-sdr</a>
-      (GPL-3.0). Needs Chrome or Edge (Web Serial) over HTTPS or localhost.
+      (GPL-3.0). Needs Chrome or Edge (Web Serial or WebUSB) over HTTPS or localhost.
     </footer>
   </body>
 </html>

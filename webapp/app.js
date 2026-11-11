@@ -31,9 +31,12 @@
     $('run').textContent = running ? 'Stop' : 'Start';
     $('calibrate').disabled = !history.length;
     $('export').disabled = !lastPair;
+    $('swap').disabled = busy || running || !names.some((n) => devices[n].radio.port);
     for (const n of names) {
       const on = !!devices[n].radio.port;
       $('connect-' + n).disabled = on || running;
+      $('choose-' + n).disabled = on || running;
+      $('iface-' + n).disabled = on || running;
       $('disconnect-' + n).disabled = !on || running;
       $('device-' + n).classList.toggle('connected', on);
     }
@@ -107,17 +110,57 @@
     });
   }
 
-  async function connect(n) {
+  // ---------- port selection ----------
+  // Each role remembers its interface and device, so Connect can reopen it
+  // without the browser's chooser. WebUSB devices are identified by their USB
+  // serial number (the C3 USB-Serial-JTAG reports its MAC); Web Serial only
+  // exposes vendor/product IDs, so the position among the granted ports is
+  // remembered instead.
+  const storageKey = (n) => 'dual-sdr.port.' + n;
+  const load = (n) => {
+    try {
+      return JSON.parse(localStorage.getItem(storageKey(n))) || {};
+    } catch {
+      return {};
+    }
+  };
+  const save = (n, value) => {
+    try {
+      localStorage.setItem(storageKey(n), JSON.stringify(value));
+    } catch {}
+  };
+  const portSerial = (port) => (SerialConnection.kind(port) === 'webusb' ? port.device.serialNumber || '' : '');
+
+  async function rememberedPort(n, kind) {
+    const saved = load(n);
+    if (saved.kind !== kind) return null;
+    const ports = await SerialConnection.getPorts(kind),
+      others = names.filter((m) => m !== n).map((m) => devices[m].radio.port);
+    const free = ports.filter((p) => !others.includes(p));
+    if (kind === 'webusb') return saved.serial ? free.find((p) => portSerial(p) === saved.serial) || null : null;
+    const p = ports[saved.index];
+    return p && free.includes(p) ? p : null;
+  }
+
+  async function remember(n, port) {
+    const kind = SerialConnection.kind(port);
+    const ports = kind === 'webserial' ? await SerialConnection.getPorts(kind) : [];
+    save(n, { kind, serial: portSerial(port), index: ports.indexOf(port) });
+  }
+
+  async function connect(n, choose = false) {
     const dev = devices[n];
+    const kind = $('iface-' + n).value;
     try {
       message(`Connecting receiver ${n}…`);
       const other = devices[n === 'A' ? 'B' : 'A'].radio.port;
-      const port = await SerialConnection.requestPort();
+      let port = choose ? null : await rememberedPort(n, kind);
+      if (!port) port = await SerialConnection.requestPort(kind);
       if (other && port === other) throw Error('This port is already used by the other receiver.');
       await dev.radio.connect({ port });
       await probeTrigger(dev.radio);
-      $('status-' + n).textContent =
-        describe(dev) + (dev.radio.hasTriggeredCapture ? ' · GPIO trigger' : ' · no GPIO trigger');
+      await remember(n, port);
+      showStatus(n);
       applyCapabilities();
       message(`Receiver ${n} connected.`);
     } catch (e) {
@@ -127,6 +170,55 @@
     updateButtons();
   }
 
+  function showStatus(n) {
+    const dev = devices[n],
+      port = dev.radio.port;
+    if (!port) {
+      $('status-' + n).textContent = 'Not connected';
+      return;
+    }
+    const serial = portSerial(port),
+      via = SerialConnection.kind(port) === 'webusb' ? 'WebUSB' + (serial ? ' ' + serial : '') : 'Web Serial';
+    $('status-' + n).textContent =
+      `${describe(dev)} · ${dev.radio.hasTriggeredCapture ? 'GPIO trigger' : 'no GPIO trigger'} · ${via}`;
+  }
+
+  function bindErrors() {
+    for (const n of names)
+      devices[n].radio.onCaptureError = () => message(`Receiver ${n}: damaged transfer, retrying…`, true);
+  }
+
+  // Exchange the two receivers (and what they remember) without reconnecting.
+  async function swap() {
+    const a = devices.A.radio,
+      b = devices.B.radio;
+    devices.A.radio = b;
+    devices.B.radio = a;
+    const sa = load('A'),
+      sb = load('B');
+    save('A', sb);
+    save('B', sa);
+    for (const n of names) {
+      if (devices[n].radio.port) await remember(n, devices[n].radio.port);
+      $('iface-' + n).value = load(n).kind || $('iface-' + n).value;
+      showStatus(n);
+    }
+    bindErrors();
+    message('Receivers A and B swapped.');
+    updateButtons();
+  }
+
+  function initInterfaces() {
+    const available = { webserial: !!navigator.serial, webusb: !!navigator.usb };
+    for (const n of names) {
+      const sel = $('iface-' + n);
+      for (const opt of sel.options) opt.disabled = !available[opt.value];
+      const saved = load(n).kind;
+      sel.value = saved && available[saved] ? saved : SerialConnection.defaultKind();
+      sel.addEventListener('change', () => save(n, { ...load(n), kind: sel.value }));
+    }
+  }
+
   async function disconnect(n) {
     const dev = devices[n];
     try {
@@ -134,7 +226,7 @@
     } catch (e) {
       message(e.message || String(e), true);
     }
-    $('status-' + n).textContent = 'Not connected';
+    showStatus(n);
     updateButtons();
   }
 
@@ -623,6 +715,7 @@
   // ---------- wiring ----------
   for (const n of names) {
     $('connect-' + n).addEventListener('click', () => connect(n));
+    $('choose-' + n).addEventListener('click', () => connect(n, true));
     $('disconnect-' + n).addEventListener('click', () => disconnect(n));
   }
   $('capture').addEventListener('click', captureOnce);
@@ -663,11 +756,12 @@
       render();
     });
   window.addEventListener('resize', render);
-  for (const n of names)
-    devices[n].radio.onCaptureError = () => message(`Receiver ${n}: damaged transfer, retrying…`, true);
+  bindErrors();
+  initInterfaces();
+  $('swap').addEventListener('click', swap);
 
-  if (!('serial' in navigator) && !SerialConnection.supported?.())
-    message('This browser has no Web Serial support. Use Chrome or Edge on the desktop.', true);
+  if (!SerialConnection.supported())
+    message('This browser supports neither Web Serial nor WebUSB. Use Chrome or Edge.', true);
   updateButtons();
 
   // For tests and the console.

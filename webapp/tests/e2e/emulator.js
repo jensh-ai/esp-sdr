@@ -1,9 +1,10 @@
-// Fake navigator.serial with two emulated ESP-SDR C3 receivers (TCAP-capable).
+// Fake navigator.serial and navigator.usb with two emulated ESP-SDR C3 receivers
+// (TCAP-capable).
 // Test-only stand-in for the firmware protocol; injected by e2e.cjs.
 (() => {
   const CRC = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
   const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-  const shared = { wireConnected: true, pendingSlave: null, log: [], captures: 0 };
+  const shared = { wireConnected: true, pendingSlave: null, log: [], captures: 0, requests: 0 };
   window.__emu = shared;
   function makeSource(n) {
     // white noise source plus a tone; B sees it 3 samples later, rotated by 0.5 rad, with 20 kHz LO offset
@@ -36,8 +37,19 @@
     return b;
   }
   class Device {
-    constructor(name) { this.name = name; this.buf = ''; this.out = []; this.wake = null; }
-    send(x) { this.out.push(typeof x === 'string' ? new TextEncoder().encode(x) : x); this.wake?.(); }
+    constructor(name) { this.name = name; this.buf = ''; this.out = []; this.waiters = []; }
+    send(x) { this.out.push(typeof x === 'string' ? new TextEncoder().encode(x) : x); this.wakeAll(); }
+    wakeAll() { for (const r of this.waiters.splice(0)) r(); }
+    async next() { while (!this.out.length) await new Promise((r) => this.waiters.push(r)); }
+    receive(chunk) {
+      this.buf += new TextDecoder().decode(chunk);
+      let i;
+      while ((i = this.buf.indexOf('\n')) >= 0) {
+        const line = this.buf.slice(0, i).trim();
+        this.buf = this.buf.slice(i + 1);
+        if (line) this.handle(line);
+      }
+    }
     handle(line) {
       shared.log.push(this.name + ': ' + line);
       let m;
@@ -78,33 +90,66 @@
     }
   }
   function makePort(dev) {
-    let reader;
     return {
       getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
       async open() {
         this.readable = new ReadableStream({
           pull: async (ctrl) => {
-            while (!dev.out.length) await new Promise((r) => (dev.wake = r));
+            await dev.next();
             ctrl.enqueue(dev.out.shift());
           },
         });
-        this.writable = new WritableStream({
-          write: (chunk) => {
-            dev.buf += new TextDecoder().decode(chunk);
-            let i;
-            while ((i = dev.buf.indexOf('\n')) >= 0) {
-              const line = dev.buf.slice(0, i).trim();
-              dev.buf = dev.buf.slice(i + 1);
-              if (line) dev.handle(line);
-            }
-          },
-        });
+        this.writable = new WritableStream({ write: (chunk) => dev.receive(chunk) });
       },
       async close() {},
       async setSignals() {},
     };
   }
-  const ports = [makePort(new Device('A')), makePort(new Device('B'))];
-  let next = 0;
-  Object.defineProperty(navigator, 'serial', { value: { requestPort: async () => ports[next++], getPorts: async () => [] } });
+  // USBDevice with the C3 USB-Serial-JTAG layout: CDC control (0) + data (1),
+  // plus the vendor-specific JTAG interface (2).
+  function makeUsbDevice(dev) {
+    const ep = (n, direction) => ({ endpointNumber: n, direction, type: 'bulk', packetSize: 64 });
+    const alt = (cls, sub, endpoints = []) => ({ alternateSetting: 0, interfaceClass: cls, interfaceSubclass: sub, endpoints });
+    const iface = (n, a) => ({ interfaceNumber: n, alternate: a, alternates: [a] });
+    const cfg = { configurationValue: 1, interfaces: [iface(0, alt(2, 2)), iface(1, alt(10, 0, [ep(2, 'in'), ep(2, 'out')])), iface(2, alt(255, 255))] };
+    let closed = true;
+    return {
+      vendorId: 0x303a, productId: 0x1001, serialNumber: 'EMU:' + dev.name,
+      configuration: null, configurations: [cfg],
+      async open() { closed = false; },
+      async selectConfiguration() { this.configuration = cfg; },
+      async claimInterface() {},
+      async selectAlternateInterface() {},
+      async controlTransferOut() { return { status: 'ok' }; },
+      async transferIn(_, size) {
+        while (!closed && !dev.out.length) await new Promise((r) => dev.waiters.push(r));
+        if (closed) throw new DOMException('The device was closed.', 'AbortError');
+        const head = dev.out[0], part = head.subarray(0, size);
+        if (part.length === head.length) dev.out.shift(); else dev.out[0] = head.subarray(size);
+        return { status: 'ok', data: new DataView(part.buffer, part.byteOffset, part.byteLength) };
+      },
+      async transferOut(_, bytes) { dev.receive(bytes); return { status: 'ok', bytesWritten: bytes.byteLength }; },
+      async close() {
+        closed = true;
+        dev.wakeAll(); // fail the pending reads like a real USBDevice.close() does
+      },
+    };
+  }
+  const devs = [new Device('A'), new Device('B')];
+  const ports = devs.map(makePort), usb = devs.map(makeUsbDevice);
+  const granted = { serial: [], usb: [] };
+  const grant = (list, all) => async () => {
+    shared.requests++;
+    const next = all.find((x) => !list.includes(x));
+    if (!next) throw new DOMException('No port selected by the user.', 'NotFoundError');
+    list.push(next);
+    return next;
+  };
+  Object.defineProperty(navigator, 'serial', { value: { requestPort: grant(granted.serial, ports), getPorts: async () => [...granted.serial] } });
+  Object.defineProperty(navigator, 'usb', { value: { requestDevice: grant(granted.usb, usb), getDevices: async () => [...granted.usb] } });
+  // Permissions survive a reload in a real browser.
+  shared.restore = (serial, usbNames) => {
+    granted.serial.push(...serial.map((i) => ports[i]));
+    granted.usb.push(...usbNames.map((i) => usb[i]));
+  };
 })();

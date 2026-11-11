@@ -17,14 +17,14 @@ ESP32-C3 firmware in `firmware/`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../docs/webapp-correlator-dark.png">
-  <img src="../docs/webapp-correlator-light.png" alt="Dual-SDR Correlator after 38 GPIO-triggered captures: metrics, power spectrum with reference and target bands, envelope, cross-correlation, cross-spectrum phase and phase history">
+  <img src="../docs/webapp-correlator-light.png" alt="Dual-SDR Correlator after about 30 GPIO-triggered captures: metrics, power spectrum with reference and target bands, envelope, cross-correlation, cross-spectrum phase and phase history">
 </picture>
 
 *The screenshot shows two **emulated** receivers (a browser-side stand-in for
 the firmware protocol, not real hardware): wideband noise plus a CW reference
 at −3 MHz, receiver B with a 20 kHz LO offset, a 3-sample time offset and an
-extra 0.6 rad (34.4°) on the reference. The app recovers 20.00 kHz,
-−3.00 samples and Δφ = 34.3° with 0.8° spread over 38 captures.*
+extra 0.6 rad (34.4°) on the reference. The app recovers the 20 kHz,
+the −3 samples and Δφ ≈ 34.4° with a spread below 1° over about 30 captures.*
 
 How to read the plots:
 
@@ -38,8 +38,25 @@ How to read the plots:
 
 ## Hosting
 
-The app is static: serve this folder with any web server. Web Serial requires
-**HTTPS or localhost** and Chrome/Edge (or Firefox 151+) on the desktop.
+The app is static: serve this folder with any web server. Web Serial and
+WebUSB require **HTTPS or localhost** and Chrome/Edge (or Firefox 151+).
+
+## Connecting
+
+Each receiver card chooses its interface:
+
+- **Web Serial** (default on the desktop): works on every OS.
+- **WebUSB (native USB)**: talks CDC directly to the C3's USB-Serial-JTAG. It
+  needs the CDC interface to be free of an OS driver; on desktop Linux the
+  `cdc_acm` driver normally owns it, so use Web Serial there.
+
+The browser asks only once per device. **Connect** reopens the device chosen
+last time for that role; **Other device…** opens the chooser. WebUSB identifies
+each board by its USB serial number (the C3 reports its MAC), so A and B keep
+their roles even after a reload. Web Serial does not expose serial numbers, so
+the app remembers the position in the list of granted ports instead; check the
+roles after replugging. **Swap A ↔ B** exchanges the roles of the connected
+receivers (A drives the trigger line).
 
 ```bash
 cd webapp && python3 -m http.server 8000

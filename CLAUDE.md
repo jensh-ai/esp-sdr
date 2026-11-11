@@ -76,6 +76,11 @@ Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
 - `index.html`/`app.js`/`style.css`: Zwei-Empfänger-UI (Web Serial). GPIO-Modus:
   B (Slave) scharf schalten, auf `ARMED` warten, dann A (Master). Software-Modus
   (zwei CAP-Befehle, ~1 ms Jitter > 205-µs-Snapshot) nur als Fallback.
+- Verbindung pro Empfänger wahlweise Web Serial oder WebUSB (CDC über
+  `NativeUSBPort` aus `serial-transport.js`). Rolle → Gerät in `localStorage`
+  (`dual-sdr.port.A/B`: WebUSB per USB-Seriennummer, Web Serial per Index in
+  `getPorts()`), „Connect“ ohne Browser-Dialog, „Other device…“ mit Dialog,
+  „Swap A ↔ B“ tauscht Rollen. Emulator kennt auch `navigator.usb`.
 - `radio.js`, `serial-transport.js`: unverändert aus ESPARGOS/esp-web-sdr `6995ed7`.
   `flash.html` + `flasher/`: Web-Flasher (esptool-js), lädt `firmware/manifest.json`.
 - `dsp.js` (Browser + Node), Pipeline in `analyze()`:
