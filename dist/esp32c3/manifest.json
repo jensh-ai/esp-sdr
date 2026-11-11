@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "version": "81e1a9e5a120a11905cb6de67379e4d0a8fc56e1",
+  "variants": {
+    "esp32c3": {
+      "revision": "esp32c3",
+      "label": "ESP32-C3 (2 MB or larger)",
+      "target": "esp32c3",
+      "chip": "ESP32-C3",
+      "version": "81e1a9e5a120a11905cb6de67379e4d0a8fc56e1",
+      "flash_size": "2MB",
+      "flash_size_policy": "minimum",
+      "flash_settings": {
+        "flash_mode": "dio",
+        "flash_size": "2MB",
+        "flash_freq": "80m"
+      },
+      "esptool_args": {
+        "after": "hard-reset",
+        "before": "default-reset",
+        "stub": true,
+        "chip": "esp32c3"
+      },
+      "parts": [
+        {
+          "name": "0-bootloader.bin",
+          "offset": 0,
+          "size": 21344,
+          "sha256": "4d0d098f14007c857e010cf5c92b67568c263d6237a12aab7ab364522e57bdbd",
+          "md5": "0c19fe3eeb1d2ee0e2d3bded06000779"
+        },
+        {
+          "name": "1-partition-table.bin",
+          "offset": 32768,
+          "size": 3072,
+          "sha256": "7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820",
+          "md5": "5d61d196adc3dba01928f264eb169be7"
+        },
+        {
+          "name": "2-esp_sdr.bin",
+          "offset": 65536,
+          "size": 704768,
+          "sha256": "497ffb182edd976054c80a4e27e65e149e62f7455a7afaf5f8034f9cbf28c2b3",
+          "md5": "bc3b14e3bcb5a5dd8fc99d1eeb797e3c"
+        }
+      ],
+      "build_date": "2026-11-11",
+      "git_revision": "81e1a9e5a120a11905cb6de67379e4d0a8fc56e1",
+      "build_timestamp": "2026-11-11T12:47:49Z"
+    }
+  }
+}
