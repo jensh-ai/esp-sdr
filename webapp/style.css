@@ -184,6 +184,11 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.hint {
+  margin: 10px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
 #message {
   min-height: 1.4em;
   margin: 0 0 8px;

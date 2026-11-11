@@ -26,19 +26,31 @@ cd webapp && python3 -m http.server 8000
 
 Then open <http://localhost:8000/>.
 
-## Limits of the current firmware
+**GitHub Pages:** `.github/workflows/pages.yml` publishes this folder from
+`main` on every change, without a separate `gh-pages` branch. Enable it once in
+the repository under *Settings → Pages → Build and deployment → Source:
+GitHub Actions*. The app is then at `https://<user>.github.io/<repo>/`.
 
-Both snapshots are started by separate USB commands, so they begin with a
-host/USB jitter in the order of a millisecond, while a full snapshot is only
-about 205 µs long at 80 MS/s. The correlation only works when both snapshots
-contain the same signal at the same time. Without a hardware trigger this is
-the case for continuous signals, or by chance. A shared GPIO trigger in the
-firmware is the next step.
+## Synchronizing the two receivers
 
-The time offset can only be measured from wideband signals (a CW tone looks
-the same at every delay). The app warns when no wideband coherent component is
-present, because the phase difference between bands at different frequencies
-is then unreliable.
+With the default **GPIO trigger**, both snapshots start on a shared wire:
+
+1. Connect the trigger pin (default GPIO 4) of board A to the same pin of
+   board B, and connect the GND of both boards. A series resistor of a few
+   hundred ohms protects against both sides driving the line by mistake.
+   Avoid the strapping pins 2, 8 and 9, the USB pins 18/19 and the UART pins
+   20/21.
+2. A raises the line, B listens. The app arms B first and only then lets A
+   fire; see `TCAP` in [docs/protocol.md](../docs/protocol.md).
+
+The remaining start-time difference is a few samples and is measured from the
+data. That needs a wideband signal in both snapshots (a CW tone looks the same
+at every delay): the app warns when there is none, because the phase
+difference between bands at different frequencies is then unreliable.
+
+**Software trigger** (two USB commands) remains available for firmware without
+`TCAP`; its start-time jitter of about a millisecond is longer than a whole
+snapshot (205 µs at 80 MS/s), so the snapshots only overlap by chance.
 
 ## Files
 

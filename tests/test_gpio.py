@@ -30,6 +30,10 @@ typedef int esp_err_t;
 #define ESP_OK 0
 #define GPIO_MODE_DISABLE 0
 #define GPIO_MODE_OUTPUT 2
+#define GPIO_MODE_INPUT 1
+#define GPIO_MODE_INPUT_OUTPUT 3
+#define GPIO_PULLDOWN_ONLY 1
+#define GPIO_FLOATING 3
 #define GPIO_PULLUP_DISABLE 0
 #define GPIO_PULLDOWN_DISABLE 0
 #define GPIO_INTR_DISABLE 0
@@ -37,6 +41,7 @@ typedef struct { uint64_t pin_bit_mask; int mode, pull_up_en, pull_down_en, intr
 int gpio_config(const gpio_config_t *);
 int gpio_set_level(unsigned, unsigned);
 int gpio_set_direction(unsigned, int);
+int gpio_set_pull_mode(unsigned, int);
 ''',
                 'esp_check.h': '#include <assert.h>\n#define ESP_ERROR_CHECK(x) assert((x)==0)\n',
                 'esp_private/esp_gpio_reserve.h': '''#include <stdint.h>
@@ -60,7 +65,7 @@ uint64_t esp_gpio_reserve(uint64_t);
 #include "driver/gpio.h"
 #include "soc/soc_caps.h"
 static uint64_t reserved = UINT64_C(1)<<5, configured;
-static unsigned levels[64], modes[64], calls, order;
+static unsigned levels[64], modes[64], pulls[64], calls, order;
 static int fail;
 static char response[512];
 bool esp_gpio_is_reserved(uint64_t mask) { return !!(reserved & mask); }
@@ -70,7 +75,8 @@ int gpio_config(const gpio_config_t *c) {
  assert(!(configured & c->pin_bit_mask));configured|=c->pin_bit_mask;++calls;return 0;
 }
 int gpio_set_level(unsigned pin,unsigned level) { ++calls;order=1;if(fail)return -1;levels[pin]=level;return 0; }
-int gpio_set_direction(unsigned pin,int mode) { ++calls;if(mode==GPIO_MODE_OUTPUT)assert(order==1);order=0;modes[pin]=mode;return 0; }
+int gpio_set_direction(unsigned pin,int mode) { ++calls;if(mode==GPIO_MODE_OUTPUT||mode==GPIO_MODE_INPUT_OUTPUT)assert(order==1);order=0;modes[pin]=mode;return 0; }
+int gpio_set_pull_mode(unsigned pin,int mode) { pulls[pin]=mode;return 0; }
 bool burst_serial_send(const void *data,size_t size) { assert(size<sizeof(response));memcpy(response,data,size);response[size]=0;return true; }
 int main(void) {
  burst_gpio_init();assert(configured==EXPECTED_MASK);
@@ -87,10 +93,22 @@ int main(void) {
    assert(burst_gpio_command(cmd));snprintf(ack,sizeof(ack),"OK GPIO %u %c\n",pin,*s);
    assert(!strcmp(response,ack));
    assert(modes[pin]==(*s=='Z'?GPIO_MODE_DISABLE:GPIO_MODE_OUTPUT));
+   assert(pulls[pin]==GPIO_FLOATING);
    if(*s!='Z')assert(levels[pin]==(unsigned)(*s=='1'));
   }
   assert(burst_gpio_command("GPIO?"));
+  /* Trigger line: driven output (reported low) or pulled-down input (Z). */
+  assert(burst_gpio_trigger_pin(pin,true));
+  assert(modes[pin]==GPIO_MODE_INPUT_OUTPUT&&levels[pin]==0&&pulls[pin]==GPIO_FLOATING);
+  assert(burst_gpio_command("GPIO?"));snprintf(item,sizeof(item)," %u:0",pin);assert(strstr(response,item));
+  assert(burst_gpio_trigger_pin(pin,false));
+  assert(modes[pin]==GPIO_MODE_INPUT&&pulls[pin]==GPIO_PULLDOWN_ONLY);
+  assert(burst_gpio_command("GPIO?"));snprintf(item,sizeof(item)," %u:Z",pin);assert(strstr(response,item));
+  snprintf(cmd,sizeof(cmd),"GPIO %u Z",pin);assert(burst_gpio_command(cmd));
+  assert(modes[pin]==GPIO_MODE_DISABLE&&pulls[pin]==GPIO_FLOATING);
+  assert(burst_gpio_command("GPIO?"));
  }
+ for(unsigned pin=0;pin<64;pin++) if(!(EXPECTED_MASK&(UINT64_C(1)<<pin))) assert(!burst_gpio_trigger_pin(pin,false));
  const char *bad[]={"GPIO", "GPIO 5 1", "GPIO 64 1", "GPIO 999999999999999999999 0",
   "GPIO -1 0", "GPIO -0 1", "GPIO +0 1", "GPIO 00 1", "GPIO 0 2", "GPIO 0 z", "GPIO 0 1 junk", "GPIO 0", "GPIO 0 10"};
  unsigned before=calls;

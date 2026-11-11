@@ -68,6 +68,39 @@ followed by exactly `ceil(samples * bits * 2 / 8)` bytes. Check the CRC32
 
 A capture is a single burst; there are gaps between captures.
 
+### Triggered captures (ESP32-C3, `TCAP` in `CAPS`)
+
+Two receivers can start their snapshots together on a shared GPIO line:
+
+```text
+TCAP16 <samples> <rate> <pin> <M|S> <timeout-ms>
+TCAP20 <samples> <rate> <pin> <M|S> <timeout-ms>
+```
+
+`<pin>` must be one of the pins `GPIO?` lists; connect that pin of both boards
+and their GND. `S` (listener) configures the pin as input with pulldown, `M`
+(master) as output that it raises itself. Unlike other commands, `TCAP`
+replies with several lines:
+
+1. `ARMED` once the receiver is configured and waits for the line. Arm the
+   listener first and wait for its `ARMED` before sending `M` to the master.
+2. `TRIG <late> <wait-us>`: `late` is `1` if the edge arrived while the
+   receiver briefly had interrupts enabled between polling windows, which
+   makes its start time less precise. `wait-us` is the time from arming to
+   the trigger.
+3. The usual `DATA` header and payload, as for `CAP16`/`CAP20`.
+
+Both receivers arm the dump engine first and then poll the line with
+interrupts disabled; the master raises the line and reads it back through the
+same input path, so both detect it with the same latency. The remaining
+jitter is expected to be in the order of one polling iteration (tens of ns),
+but has not been measured on hardware yet. The master lowers the line after
+its capture.
+
+Errors: `ERR trigger_args`, `ERR rate`, `ERR trigger_pin` (pin not available),
+`ERR gain`, `ERR trigger_busy` (listener sees the line high before arming),
+`ERR trigger_timeout` (no edge within `<timeout-ms>`, at most 3000).
+
 The [S3 continuous stream](iq-stream.md) also sends `(I, -Q)` pairs.
 The separate [S31 streaming firmware](s31-streaming.md#iq-packets) sends
 `(I, Q)` pairs.

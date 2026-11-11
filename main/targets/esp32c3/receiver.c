@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "heap_memory_layout.h"
 #include "nvs_flash.h"
+#include "soc/gpio_reg.h"
 #include "soc/soc.h"
 
 #include "burst_serial.h"
@@ -99,7 +100,23 @@ static void prepare_rx(void) {
 
 #include "burst_capture.h"
 static portMUX_TYPE capture_mux = portMUX_INITIALIZER_UNLOCKED;
-static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
+
+/* Shared GPIO trigger line between two receivers (TCAP command). Both sides
+ * arm the dump engine first and then poll the same line with interrupts
+ * disabled; the master raises the line and reads it back through the same
+ * input path, so both see the edge with the same latency. */
+typedef struct {
+    unsigned pin;
+    bool drive;          /* master: raises the line */
+    int64_t timeout_us;  /* waiting time for the slave */
+    bool late;           /* out: edge arrived while interrupts were enabled */
+    bool timed_out;      /* out */
+    uint32_t wait_us;    /* out: time from arming to trigger */
+} capture_trigger_t;
+/* Poll iterations per interrupt-free window, roughly 1 ms on the C3. */
+#define TRIGGER_WINDOW_SPINS 10000u
+
+static bool acquire_iq_triggered(unsigned n, unsigned divider, unsigned *capture_us, capture_trigger_t *trig) {
     if (divider != 0 && divider != 1 && divider != 6) {
         reply("ERR rate\n");
         return false;
@@ -122,16 +139,57 @@ static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
     /* Like the S3: bit 15 halves the 80 MS/s dump clock, bit 16 divides it by five. */
     uint32_t ctrl = 0x80000000u | n | (divider == 1 ? 1u << 15 : divider == 6 ? 1u << 16 : 0);
     REG_WRITE(0x60033d5c, ctrl);
-    REG_WRITE(0x60033d5c, ctrl | (1u << 19));
-    REG_WRITE(0x60033d5c, ctrl);
-    while (!(REG_READ(0x60033d5c) & (1u << 18)) && esp_timer_get_time() - start < 20000) {}
-    bool done = (REG_READ(0x60033d5c) & (1u << 18)) != 0;
-    uint32_t elapsed = esp_timer_get_time() - start;
+    bool done = false;
+    uint32_t elapsed = 0;
+    if (trig) {
+        const uint32_t mask = 1u << trig->pin;
+        const int64_t armed = start, deadline = start + trig->timeout_us;
+        bool first = true;
+        if (trig->drive) REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+        for (;;) {
+            uint32_t spins = 0, level;
+            while (!((level = REG_READ(GPIO_IN_REG)) & mask) && spins < TRIGGER_WINDOW_SPINS) spins++;
+            if (level & mask) {
+                /* High at the first read of a later window: the edge came
+                 * while interrupts were enabled, so its latency is unknown. */
+                trig->late = !trig->drive && spins == 0 && !first;
+                break;
+            }
+            first = false;
+            /* Let interrupts run between windows; the dump engine stays armed. */
+            taskEXIT_CRITICAL(&capture_mux);
+            bool expired = esp_timer_get_time() >= deadline;
+            taskENTER_CRITICAL(&capture_mux);
+            if (expired) {
+                trig->timed_out = true;
+                break;
+            }
+        }
+        if (!trig->timed_out) {
+            REG_WRITE(0x60033d5c, ctrl | (1u << 19));
+            REG_WRITE(0x60033d5c, ctrl);
+            start = esp_timer_get_time();
+            trig->wait_us = (uint32_t)(start - armed);
+        }
+    } else {
+        REG_WRITE(0x60033d5c, ctrl | (1u << 19));
+        REG_WRITE(0x60033d5c, ctrl);
+    }
+    if (!trig || !trig->timed_out) {
+        while (!(REG_READ(0x60033d5c) & (1u << 18)) && esp_timer_get_time() - start < 20000) {}
+        done = (REG_READ(0x60033d5c) & (1u << 18)) != 0;
+        elapsed = esp_timer_get_time() - start;
+    }
+    if (trig && trig->drive) REG_WRITE(GPIO_OUT_W1TC_REG, 1u << trig->pin);
     REG_WRITE(0x60033d5c, 0);
     REG_WRITE(SRAM_OWNER_REG, owner);
     __asm__ volatile("fence rw,rw" ::: "memory");
     taskEXIT_CRITICAL(&capture_mux);
     rx_filter_restore();
+    if (trig && trig->timed_out) {
+        reply("ERR trigger_timeout\n");
+        return false;
+    }
     if (!done) {
         reply("ERR capture_timeout\n");
         return false;
@@ -144,6 +202,10 @@ static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
     }
     *capture_us = elapsed;
     return true;
+}
+
+static bool acquire_iq(unsigned n, unsigned divider, unsigned *capture_us) {
+    return acquire_iq_triggered(n, divider, capture_us, NULL);
 }
 
 static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, unsigned *elapsed) {
@@ -163,6 +225,49 @@ static bool capture(unsigned n, unsigned divider, unsigned format) {
     return burst_send_capture(n, format, elapsed);
 }
 
+/* TCAP16|TCAP20 <samples> <rate> <pin> <M|S> <timeout_ms>: one capture
+ * started by the shared trigger line. Replies ARMED once the receiver waits,
+ * then TRIG <late> <wait_us> and the usual DATA header and payload. */
+static bool triggered_capture_command(const char *line) {
+    unsigned bits, n, divider, pin, timeout_ms;
+    char role, extra;
+    if (strncmp(line, "TCAP", 4)) return false;
+    if (sscanf(line, "TCAP%u %u %u %u %c %u %c", &bits, &n, &divider, &pin, &role, &timeout_ms, &extra) != 6 ||
+        (bits != 16 && bits != 20) || n < 256 || n > IQ_WORDS || (role != 'M' && role != 'S') ||
+        timeout_ms < 1 || timeout_ms > 3000) {
+        reply("ERR trigger_args\n");
+        return true;
+    }
+    if (divider != 0 && divider != 1 && divider != 6) {
+        reply("ERR rate\n");
+        return true;
+    }
+    capture_trigger_t trig = {.pin = pin, .drive = role == 'M', .timeout_us = (int64_t)timeout_ms * 1000};
+    if (!burst_gpio_trigger_pin(pin, trig.drive)) {
+        reply("ERR trigger_pin\n");
+        return true;
+    }
+    prepare_rx();
+    if (!gain_applied) {
+        reply("ERR gain\n");
+        return true;
+    }
+    /* A slave must see the line low before it arms, or it would fire at once. */
+    esp_rom_delay_us(20);
+    if (!trig.drive && (REG_READ(GPIO_IN_REG) & (1u << pin))) {
+        reply("ERR trigger_busy\n");
+        return true;
+    }
+    reply("ARMED\n");
+    unsigned elapsed;
+    if (!acquire_iq_triggered(n, divider, &elapsed, &trig)) return true;
+    char header[48];
+    snprintf(header, sizeof(header), "TRIG %u %" PRIu32 "\n", trig.late ? 1u : 0u, trig.wait_us);
+    reply(header);
+    burst_send_capture(n, bits, elapsed);
+    return true;
+}
+
 #define BURST_ID       "C3SDR"
 #define BURST_MAX_RATE 6
 #include "burst_commands.h"
@@ -170,6 +275,7 @@ static bool capture(unsigned n, unsigned divider, unsigned format) {
 static void handle_command(char *line) {
     if (burst_version_command(line)) return;
     if (burst_gpio_command(line)) return;
+    if (triggered_capture_command(line)) return;
 #ifdef RING_PROBE
     if (ring_probe_command(line)) return;
 #endif
@@ -184,7 +290,7 @@ static void handle_command(char *line) {
 #if CONFIG_ESP_SDR_UART_ENABLED
               "DUALSERIAL "
 #endif
-              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8\n");
+              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 TCAP\n");
     } else if (sscanf(line, "BANDWIDTH %u %c", &n, &extra) == 1 &&
                (!n || (n >= RX_BANDWIDTH_MIN && n <= RX_BANDWIDTH_MAX))) {
         rx_filter = rx_bandwidth_dcap(n);

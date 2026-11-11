@@ -77,6 +77,18 @@ void burst_gpio_init(void) {
     }
 }
 
+bool burst_gpio_trigger_pin(unsigned pin, bool drive) {
+    if (pin >= SOC_GPIO_PIN_COUNT || !(available & PIN(pin))) return false;
+    esp_err_t err = gpio_set_level(pin, 0);
+    if (err == ESP_OK) err = gpio_set_direction(pin, drive ? GPIO_MODE_INPUT_OUTPUT : GPIO_MODE_INPUT);
+    if (err == ESP_OK) err = gpio_set_pull_mode(pin, drive ? GPIO_FLOATING : GPIO_PULLDOWN_ONLY);
+    if (err != ESP_OK) return false;
+    /* GPIO? keeps reporting the standard states: a driven trigger line is
+     * low between captures, an input is high impedance. */
+    states[pin] = drive ? '0' : 'Z';
+    return true;
+}
+
 static void reply(const char *s) {
     burst_serial_send(s, strlen(s));
 }
@@ -113,6 +125,7 @@ bool burst_gpio_command(const char *line) {
     esp_err_t err = ESP_OK;
     if (state != 'Z') err = gpio_set_level(pin, state == '1');
     if (err == ESP_OK) err = gpio_set_direction(pin, state == 'Z' ? GPIO_MODE_DISABLE : GPIO_MODE_OUTPUT);
+    if (err == ESP_OK) err = gpio_set_pull_mode(pin, GPIO_FLOATING);
     if (err != ESP_OK) {
         reply("ERR gpio_io\n");
         return true;

@@ -46,6 +46,9 @@
       samples: Math.round(num('samples')),
       gainMode: $('gain-mode').value,
       gain: Math.round(num('gain')),
+      trigger: $('trigger-mode').value,
+      triggerPin: Math.round(num('trigger-pin')),
+      triggerTimeout: Math.round(num('trigger-timeout')),
     };
     if (!Number.isInteger(c.frequency)) throw Error('Use a whole-MHz center frequency.');
     if (!(c.samples >= 512)) throw Error('Use at least 512 samples.');
@@ -89,6 +92,18 @@
     $('gain').max = Math.min(...radios.map((r) => r.gainMax));
     const agc = radios.every((r) => r.hasHardwareAgc);
     $('gain-mode').options[1].disabled = !agc;
+    // Offer the GPIO trigger only when every connected receiver supports it.
+    const tcap = radios.every((r) => r.hasTriggeredCapture);
+    $('trigger-mode').options[0].disabled = !tcap;
+    $('trigger-mode').value = tcap ? 'gpio' : 'software';
+  }
+
+  // radio.js does not keep the capability list, so ask for TCAP separately.
+  async function probeTrigger(r) {
+    await r.run(async () => {
+      await r.command('CAPS');
+      r.hasTriggeredCapture = (await r.line('CAPS')).split(' ').includes('TCAP');
+    });
   }
 
   async function connect(n) {
@@ -99,7 +114,9 @@
       const port = await SerialConnection.requestPort();
       if (other && port === other) throw Error('This port is already used by the other receiver.');
       await dev.radio.connect({ port });
-      $('status-' + n).textContent = describe(dev);
+      await probeTrigger(dev.radio);
+      $('status-' + n).textContent =
+        describe(dev) + (dev.radio.hasTriggeredCapture ? ' · GPIO trigger' : ' · no GPIO trigger');
       applyCapabilities();
       message(`Receiver ${n} connected.`);
     } catch (e) {
@@ -138,11 +155,24 @@
         }),
       ),
     );
-    // Phase 2: issue both capture commands in the same task so they leave the
-    // host as close together as possible. Without a hardware trigger the
-    // snapshots still start with USB/firmware jitter (typically < 1 ms).
     const t0 = performance.now();
-    const packets = await Promise.all(
+    let packets;
+    if (c.trigger === 'gpio') {
+      if (!radios.every((r) => r.hasTriggeredCapture)) throw Error('Both receivers need firmware with GPIO trigger.');
+      // Phase 2 (GPIO): arm B, and only when B reports ARMED let A raise the line.
+      let armedB;
+      const bArmed = new Promise((resolve, reject) => (armedB = { resolve, reject }));
+      const [b, a] = radios.slice().reverse();
+      const slave = b.run(() => triggeredPacket(b, c, divider, 'S', armedB));
+      const master = a.run(async () => {
+        await bArmed;
+        return triggeredPacket(a, c, divider, 'M', null);
+      });
+      // If arming B fails, release A's wait before reporting the error.
+      slave.catch((e) => armedB.reject(e));
+      packets = await Promise.all([master, slave]);
+      for (const p of packets) p.hostMs = performance.now() - t0;
+    } else packets = await Promise.all(
       radios.map((r) =>
         r.run(async () => {
           r.captureSamples = Math.min(c.samples, r.maxSamples);
@@ -156,6 +186,7 @@
       time: new Date().toISOString(),
       settings: c,
       gains,
+      trigger: packets.map((p) => p.trigger ?? null),
       devices: names.map((n, i) => ({
         name: n,
         identity: radios[i].identity,
@@ -166,6 +197,36 @@
         bytes: packets[i].bytes,
       })),
     };
+  }
+
+  // One TCAP transaction: ARMED, then TRIG <late> <wait_us>, DATA header and
+  // payload (the same framing and CRC as CAP16/CAP20).
+  async function triggeredPacket(r, c, divider, role, armed) {
+    const n = Math.min(c.samples, r.maxSamples);
+    try {
+      await r.command(`TCAP${c.bits * 2} ${n} ${divider} ${c.triggerPin} ${role} ${c.triggerTimeout}`);
+      const ack = await r.line();
+      if (ack !== 'ARMED') throw Error(ack);
+      armed?.resolve();
+      const trig = await r.line(), m = /^TRIG ([01]) (\d+)$/.exec(trig);
+      if (!m) throw Error(trig);
+      const header = await r.line(),
+        h = /^DATA (\d+) ([0-9a-fA-F]{1,8}) (\d+)$/.exec(header);
+      if (!h || Number(h[1]) !== n) throw Error(header.startsWith('ERR ') ? header : 'Invalid capture header');
+      const bytes = await r.read(Math.ceil((n * c.bits * 2) / 8), performance.now() + 5000, 500);
+      if (crc32(bytes) !== parseInt(h[2], 16)) throw Object.assign(Error('Capture CRC mismatch'), { code: 'CAPTURE_DAMAGED' });
+      return { bytes, n, captureUs: Number(h[3]), retries: 0, trigger: { late: m[1] === '1', waitUs: Number(m[2]) } };
+    } catch (e) {
+      const label = role === 'M' ? 'A (trigger master)' : 'B (trigger listener)';
+      const hint = /trigger_timeout/.test(e.message)
+        ? ' Check the trigger wire between the two boards, the pin number and the common GND.'
+        : /trigger_busy/.test(e.message)
+          ? ' The trigger line is high before arming: check the wiring.'
+          : '';
+      // Restore the framing for the next command after a damaged transfer.
+      if (!r.failed) await r.synchronize().catch(() => {});
+      throw Error(`Receiver ${label}: ${e.message}.${hint}`);
+    }
   }
 
   function analyzePair(pair) {
@@ -249,6 +310,13 @@
     $('m-corr').textContent = fmt(r.xc.coherence, 3);
     $('m-coh').textContent = `${fmt(r.ref.coherence, 2)} / ${fmt(r.target.coherence, 2)}`;
     $('m-cal').textContent = fmt(calibration * DEG, 1, '°');
+    const trig = lastPair.trigger ?? [];
+    $('m-trigger').textContent =
+      s.trigger === 'gpio' && trig.every(Boolean)
+        ? trig.some((t) => t.late)
+          ? 'GPIO, late edge'
+          : `GPIO (${fmt(trig[1].waitUs / 1e3, 1, ' ms')} wait)`
+        : 'software';
     $('m-count').textContent = String(history.length);
 
     const warn = [];
@@ -257,7 +325,13 @@
         'No wideband coherent signal: the sampling time offset cannot be measured, so the phase difference between bands at different frequencies is unreliable.',
       );
     if (r.xc.coherence < 0.05)
-      warn.push('Very low correlation: the two snapshots probably do not overlap in time (no common trigger yet).');
+      warn.push(
+        s.trigger === 'gpio'
+          ? 'Very low correlation: no common signal in both snapshots.'
+          : 'Very low correlation: the two snapshots probably do not overlap in time (use the GPIO trigger).',
+      );
+    if ((lastPair.trigger ?? []).some((t) => t?.late))
+      warn.push('A trigger edge arrived while the receiver had interrupts enabled; its start time is less precise.');
     if (r.ref.coherence < 0.5) warn.push('Reference band is not coherent between the receivers.');
     if (r.target.coherence < 0.5) warn.push('Target band is not coherent between the receivers.');
     if (r.clipped.some((c) => c > 0.001)) warn.push('Clipping detected: lower the gain.');

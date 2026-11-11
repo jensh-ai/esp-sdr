@@ -67,7 +67,20 @@
             </select></label
           >
           <label>Gain index<input id="gain" type="number" value="40" step="1" /></label>
+          <label
+            >Trigger
+            <select id="trigger-mode">
+              <option value="gpio">GPIO line (A drives, B listens)</option>
+              <option value="software">Software (two USB commands)</option>
+            </select></label
+          >
+          <label>Trigger GPIO (same pin on both)<input id="trigger-pin" type="number" value="4" min="0" max="21" step="1" /></label>
+          <label>Trigger timeout (ms)<input id="trigger-timeout" type="number" value="500" min="10" max="3000" step="10" /></label>
         </div>
+        <p class="hint">
+          GPIO trigger: connect the trigger pins of both boards and their GND. Firmware with <code>TCAP</code> support
+          is required on both.
+        </p>
       </section>
 
       <section class="panel" aria-labelledby="analysis-heading">
@@ -115,6 +128,7 @@
           <div><span>Time offset A vs B</span><strong id="m-lag">–</strong></div>
           <div><span>Correlation peak</span><strong id="m-corr">–</strong></div>
           <div><span>Coherence ref / target</span><strong id="m-coh">–</strong></div>
+          <div><span>Trigger</span><strong id="m-trigger">–</strong></div>
           <div><span>Calibration</span><strong id="m-cal">0°</strong></div>
           <div><span>Captures</span><strong id="m-count">0</strong></div>
         </div>

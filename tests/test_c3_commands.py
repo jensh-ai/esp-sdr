@@ -22,6 +22,7 @@ void rx_recalibrate(unsigned mhz) {}
 #include <stdbool.h>
 static bool burst_version_command(const char *s) { return false; }
 static bool burst_gpio_command(const char *s) { return false; }
+static bool triggered_capture_command(const char *s) { return false; }
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -59,7 +60,7 @@ static void prepare_rx(void) { rx_ready=true; }
 static void command(const char *s) { char line[128];snprintf(line,sizeof(line),"%s",s);handle_command(line); }
 int main(void) {
  command("INFO");assert(!strcmp(response,"C3SDR 6 burst 16380\n"));
- command("CAPS");assert(strstr(response,"RXLIMITS") && strstr(response,"SERIALLEASE") && strstr(response,"HWAGC"));
+ command("CAPS");assert(strstr(response,"RXLIMITS") && strstr(response,"SERIALLEASE") && strstr(response,"HWAGC") && strstr(response," TCAP"));
  assert(strstr(response,"TUNEEXT") && strstr(response,"LPFANA") && strstr(response,"RX40") && strstr(response,"RX16"));
  command("LIMITS?");assert(strstr(response,"\"bandwidth\":[14,62,1,0]") && strstr(response,"\"rates\":[80000000,40000000,16000000]"));
  command("TRANSPORT?");assert(!strcmp(response,"TRANSPORT UART 2000000\n"));
