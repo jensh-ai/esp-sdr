@@ -63,9 +63,13 @@ denselben Eingang zurück (gleiche Latenz). Fehler: `trigger_args`, `rate`,
 `burst_gpio_trigger_pin()` in `main/common/burst_gpio.c`. Doku: `docs/protocol.md`.
 Erster Hardware-Test (2026-11-11): Ablauf funktioniert, aber ~160 Samples (2 µs)
 Versatz, solange die Funktion aus dem Flash lief (Cache-Miss nach der
-Poll-Schleife). Seitdem `IRAM_ATTR` auf `acquire_iq_triggered`; Effekt auf
-Hardware noch ungemessen. Exportierte Paare ohne Sendung im 205-µs-Fenster
+Poll-Schleife). Seitdem `IRAM_ATTR` auf `acquire_iq_triggered`: gemessen
+nur noch −1 bis −4 Samples (Korrelation 0,82–0,996). Exportierte Paare ohne Sendung im 205-µs-Fenster
 enthalten nur Rauschen (RMS ~3–4 LSB bei Gain 40) und gehen nicht in die Mittelung.
+
+Schmale Spitzen im Spektrum auf einem 2-MHz-Raster (z. B. 2440/2444/2448 MHz)
+liegen in A und B bei identischem Offset trotz LO-Versatz → empfängerinterne
+Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
 
 ## WebApp (`webapp/`, statisch, kein Build)
 
