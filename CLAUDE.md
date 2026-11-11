@@ -33,7 +33,10 @@ sonst meldet der Stop-Hook „unpushed commits“, obwohl gepusht ist.
   (`firmware-targets.json`). Arduino-ESP32 (IDF 5.x) ist inkompatibel: esp-sdr
   braucht `--wrap`-Linkeroptionen auf PHY-Funktionen, ein eigenes Linkerskript
   und `CONFIG_ESP_PHY_ENABLE_CERT_TEST`/`ESP_PHY_DEBUG`.
-- Installation in der Cloud-Session (dauert einige Minuten):
+- Die Cloud-Umgebung **„esp-sdr“** installiert die IDF per Setup-Skript nach
+  `/opt/esp/esp-idf` und setzt `IDF_PYTHON_CHECK_CONSTRAINTS=no`. In Sessions
+  dieser Umgebung nur noch `source /opt/esp/esp-idf/export.sh`. Ohne sie
+  manuell (dauert einige Minuten):
   `git init`, `fetch --depth 1` des Commits, `submodule update --init --recursive --depth 1`,
   `./install.sh esp32c3`. Der Proxy blockiert `dl.espressif.com`, daher danach
   `python3 tools/idf_tools.py install-python-env --no-constraints` und beim
