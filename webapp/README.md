@@ -36,6 +36,62 @@ How to read the plots:
 | Cross-spectrum phase | Phase of A·B* per frequency after removing the time offset; coherent bins are highlighted. A flat line means the time offset is removed; a step between the bands is the measured Δφ |
 | History | Δφ (blue) and angle (orange) per capture |
 
+## How the analysis works
+
+Only the last step uses the reference and target bands. Everything before it
+works on the **whole snapshot at the full bandwidth** (±40 MHz around the
+center frequency at 80 MS/s). `analyze()` in `dsp.js` runs these steps for
+each pair:
+
+1. **Remove DC** from A and B.
+2. **Coarse time offset and LO offset (CFO)**, over the full bandwidth.
+   - Short segments of 256 samples are correlated and their magnitudes added,
+     so the LO offset does not destroy the correlation. The search covers
+     ±2048 samples.
+   - Around that offset, the peak of FFT(a[t+k]·b*[t]) gives the LO offset
+     (cross-ambiguity search).
+   - B is then rotated back by the LO offset.
+3. **Cross-correlation** (the *Cross-correlation* plot).
+   - r[k] = Σ a[t+k]·b*[t] over all samples, without a band filter.
+   - Its normalized peak is the *Correlation peak* metric (1 = identical
+     snapshots), and its position is a coarse time offset.
+   - Strong signals dominate it, wherever they are in the spectrum.
+4. **Cross-spectrum** A·B* per frequency bin (Welch, *Spectrum resolution*
+   bins; the *Cross-spectrum phase* plot).
+   - The time offset is refined to about 0.1 sample from the phase slope
+     across neighbouring bins.
+   - Only coherent regions count: coherence ≥ 0.5 over at least 8 bins, with
+     narrowband peaks masked out.
+   - This is also **independent of the configured bands**: any wideband
+     signal both receivers see (a Wi-Fi or BLE packet) is enough, inside or
+     outside the bands.
+   - The refinement is repeated until the offset no longer changes.
+5. **Band phases.** Only here are the bands used.
+   - For the reference and the target band, the cross-spectrum is summed over
+     the bins inside the band.
+   - The sum gives the band's phase and its magnitude-squared coherence
+     |ΣA·B*|² / (Σ|A|²·Σ|B|²), shown as the *Coherence ref / target* metric.
+   - Δφ = φ_target − φ_ref − calibration, and the angle is
+     asin(Δφ·c / (2π·f·d)).
+
+What this means in practice:
+
+- **Time offset:** any common wideband signal can provide it, also one
+  outside the bands.
+- **Correlation peak:** it only says that *something* is common to both
+  snapshots. Whether the reference and target bands carry a common signal is
+  shown by their coherence. Pairs where either band is below 0.5, or without a
+  wideband region for the time offset, are left out of the average.
+- **Spurs:** the narrow receiver-internal spurs on a 2 MHz grid (for example
+  2440, 2444 and 2448 MHz) hardly affect the correlation. They do not match
+  between A and B, and the delay refinement masks them out. Inside a band they
+  can still bias its phase, so keep them out of the reference band.
+- **Two transmitters in the same band:** they cannot be separated in the
+  cross-correlation. With a few centimetres between the antennas, the
+  geometric delay difference is far below one sample, so both produce their
+  peak at the same lag. Use different frequencies (bands) for the reference
+  and the target.
+
 ## Hosting
 
 The app is static: serve this folder with any web server. Web Serial and
