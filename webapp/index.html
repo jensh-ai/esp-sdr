@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Dual-SDR Correlator</title>
+    <link rel="stylesheet" href="style.css" />
+    <script defer src="serial-transport.js"></script>
+    <script defer src="radio.js"></script>
+    <script defer src="dsp.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Dual-SDR Correlator</h1>
+      <p>
+        Two ESP-SDR receivers, one snapshot each, cross-correlated in the browser.
+        <a href="flash.html">Install firmware</a>
+      </p>
+    </header>
+
+    <main>
+      <section class="devices" aria-label="Receivers">
+        <article class="device" id="device-A">
+          <h2><span class="swatch a"></span>Receiver A</h2>
+          <p class="device-status" id="status-A">Not connected</p>
+          <div class="row">
+            <button id="connect-A">Connect A</button>
+            <button id="disconnect-A" class="secondary" disabled>Disconnect</button>
+          </div>
+        </article>
+        <article class="device" id="device-B">
+          <h2><span class="swatch b"></span>Receiver B</h2>
+          <p class="device-status" id="status-B">Not connected</p>
+          <div class="row">
+            <button id="connect-B">Connect B</button>
+            <button id="disconnect-B" class="secondary" disabled>Disconnect</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel" aria-labelledby="capture-heading">
+        <h2 id="capture-heading">Capture</h2>
+        <div class="grid">
+          <label>Center frequency (MHz)<input id="frequency" type="number" value="2442" step="1" /></label>
+          <label
+            >Sample rate
+            <select id="rate">
+              <option value="80000000">80 MS/s</option>
+              <option value="40000000">40 MS/s</option>
+              <option value="16000000">16 MS/s</option>
+            </select></label
+          >
+          <label>Samples<input id="samples" type="number" value="16380" min="512" max="16380" step="1" /></label>
+          <label
+            >Sample format
+            <select id="bits">
+              <option value="8">8 bit</option>
+              <option value="10">10 bit</option>
+            </select></label
+          >
+          <label
+            >Gain
+            <select id="gain-mode">
+              <option value="MANUAL">Manual (same on both)</option>
+              <option value="HARDWARE">Hardware AGC</option>
+            </select></label
+          >
+          <label>Gain index<input id="gain" type="number" value="40" step="1" /></label>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="analysis-heading">
+        <h2 id="analysis-heading">Analysis</h2>
+        <div class="grid">
+          <label>Reference offset (kHz)<input id="ref-offset" type="number" value="-3000" step="1" /></label>
+          <label>Reference width (kHz)<input id="ref-width" type="number" value="200" min="1" step="1" /></label>
+          <label>Target offset (kHz)<input id="target-offset" type="number" value="4000" step="1" /></label>
+          <label>Target width (kHz)<input id="target-width" type="number" value="2000" min="1" step="1" /></label>
+          <label>Antenna spacing (cm)<input id="baseline" type="number" value="6.0" min="0.1" step="0.1" /></label>
+          <label>Max. LO offset (kHz)<input id="max-cfo" type="number" value="100" min="1" step="1" /></label>
+          <label
+            >Spectrum resolution
+            <select id="nfft">
+              <option value="512">512 bins</option>
+              <option value="1024" selected>1024 bins</option>
+              <option value="2048">2048 bins</option>
+            </select></label
+          >
+          <label>Average over (captures)<input id="average" type="number" value="20" min="1" step="1" /></label>
+        </div>
+      </section>
+
+      <section class="actions" aria-label="Actions">
+        <button id="capture" disabled>Capture once</button>
+        <button id="run" disabled>Start</button>
+        <button id="calibrate" class="secondary" disabled title="Treat the current mean phase difference as 0°">
+          Set current direction as 0°
+        </button>
+        <button id="clear-calibration" class="secondary">Clear calibration</button>
+        <button id="reset-history" class="secondary">Clear history</button>
+        <button id="export" class="secondary" disabled>Export last pair</button>
+        <button id="import" class="secondary">Load pair…</button>
+        <input id="import-file" type="file" accept=".json,application/json" hidden />
+      </section>
+      <p id="message" role="status" aria-live="polite"></p>
+
+      <section class="results" aria-label="Results">
+        <div class="metrics" id="metrics">
+          <div><span>Angle (mean)</span><strong id="m-angle">–</strong></div>
+          <div><span>Δφ target − ref (mean)</span><strong id="m-dphi">–</strong></div>
+          <div><span>Δφ spread</span><strong id="m-spread">–</strong></div>
+          <div><span>Δφ last capture</span><strong id="m-dphi-last">–</strong></div>
+          <div><span>LO offset B→A</span><strong id="m-cfo">–</strong></div>
+          <div><span>Time offset A vs B</span><strong id="m-lag">–</strong></div>
+          <div><span>Correlation peak</span><strong id="m-corr">–</strong></div>
+          <div><span>Coherence ref / target</span><strong id="m-coh">–</strong></div>
+          <div><span>Calibration</span><strong id="m-cal">0°</strong></div>
+          <div><span>Captures</span><strong id="m-count">0</strong></div>
+        </div>
+        <p id="warnings" class="warnings"></p>
+        <figure>
+          <figcaption>Power spectrum (bands: reference, target)</figcaption>
+          <canvas id="plot-spectrum"></canvas>
+        </figure>
+        <figure>
+          <figcaption>Envelope over time</figcaption>
+          <canvas id="plot-envelope"></canvas>
+        </figure>
+        <figure>
+          <figcaption>Cross-correlation |r| (zoom around the peak)</figcaption>
+          <canvas id="plot-correlation"></canvas>
+        </figure>
+        <figure>
+          <figcaption>Cross-spectrum phase after delay removal (coherent bins highlighted)</figcaption>
+          <canvas id="plot-phase"></canvas>
+        </figure>
+        <figure class="wide">
+          <figcaption>History: Δφ and angle per capture</figcaption>
+          <canvas id="plot-history"></canvas>
+        </figure>
+      </section>
+    </main>
+
+    <footer>
+      Based on <a href="https://github.com/ESPARGOS/esp-sdr" target="_blank" rel="noopener noreferrer">ESPARGOS esp-sdr</a>
+      and
+      <a href="https://github.com/ESPARGOS/esp-web-sdr" target="_blank" rel="noopener noreferrer">esp-web-sdr</a>
+      (GPL-3.0). Needs Chrome or Edge (Web Serial) over HTTPS or localhost.
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,421 @@
+'use strict';
+// Signal processing for two simultaneously captured ESP-SDR snapshots.
+// Works as a classic browser script (global DualDSP) and as a CommonJS module
+// for the Node tests. Complex signals are { re: Float64Array, im: Float64Array }.
+(function (root) {
+  const C = 299792458;
+  const TAU = 2 * Math.PI;
+
+  const nextPow2 = (n) => 2 ** Math.ceil(Math.log2(Math.max(1, n)));
+  const wrap = (phi) => phi - TAU * Math.floor((phi + Math.PI) / TAU);
+
+  // Iterative radix-2 FFT, in place. inverse=true computes the unscaled inverse.
+  const twiddleCache = new Map();
+  function twiddles(n) {
+    let t = twiddleCache.get(n);
+    if (!t) {
+      t = { cos: new Float64Array(n / 2), sin: new Float64Array(n / 2) };
+      for (let k = 0; k < n / 2; k++) {
+        t.cos[k] = Math.cos((TAU * k) / n);
+        t.sin[k] = Math.sin((TAU * k) / n);
+      }
+      twiddleCache.set(n, t);
+    }
+    return t;
+  }
+  function fft(re, im, inverse = false) {
+    const n = re.length;
+    if (n & (n - 1)) throw Error('FFT length must be a power of two');
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) {
+        let t = re[i];
+        re[i] = re[j];
+        re[j] = t;
+        t = im[i];
+        im[i] = im[j];
+        im[j] = t;
+      }
+    }
+    const { cos, sin } = twiddles(n);
+    const sign = inverse ? 1 : -1;
+    for (let len = 2; len <= n; len <<= 1) {
+      const half = len >> 1,
+        step = n / len;
+      for (let i = 0; i < n; i += len) {
+        for (let k = 0; k < half; k++) {
+          const wr = cos[k * step],
+            wi = sign * sin[k * step];
+          const a = i + k,
+            b = a + half;
+          const xr = re[b] * wr - im[b] * wi,
+            xi = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - xr;
+          im[b] = im[a] - xi;
+          re[a] += xr;
+          im[a] += xi;
+        }
+      }
+    }
+  }
+
+  function hann(n) {
+    const w = new Float64Array(n);
+    for (let j = 0; j < n; j++) w[j] = 0.5 - 0.5 * Math.cos((TAU * j) / n);
+    return w;
+  }
+
+  // Interleaved Float32 I/Q (as decoded by radio.js) to a complex signal with
+  // the mean removed. The ESP receivers have a noticeable DC offset.
+  function fromInterleaved(iq) {
+    const n = iq.length / 2,
+      re = new Float64Array(n),
+      im = new Float64Array(n);
+    let mr = 0,
+      mi = 0;
+    for (let j = 0; j < n; j++) {
+      re[j] = iq[2 * j];
+      im[j] = iq[2 * j + 1];
+      mr += re[j];
+      mi += im[j];
+    }
+    mr /= n;
+    mi /= n;
+    for (let j = 0; j < n; j++) {
+      re[j] -= mr;
+      im[j] -= mi;
+    }
+    return { re, im };
+  }
+
+  // Parabolic peak interpolation; returns the fractional offset in [-0.5, 0.5].
+  function parabolic(ym, y0, yp) {
+    const d = ym - 2 * y0 + yp;
+    return d < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (ym - yp)) / d)) : 0;
+  }
+
+  // Frequency offset between the two local oscillators. The product a*conj(b)
+  // turns every signal both receivers see into a tone at the LO difference.
+  // Returns hz such that b * exp(+j*2*pi*hz*t) is frequency-aligned with a.
+  function estimateCfo(a, b, fs, maxHz = 100e3) {
+    const n = Math.min(a.re.length, b.re.length),
+      N = nextPow2(n) * 4,
+      re = new Float64Array(N),
+      im = new Float64Array(N),
+      w = hann(n);
+    for (let j = 0; j < n; j++) {
+      re[j] = w[j] * (a.re[j] * b.re[j] + a.im[j] * b.im[j]);
+      im[j] = w[j] * (a.im[j] * b.re[j] - a.re[j] * b.im[j]);
+    }
+    fft(re, im);
+    const bins = Math.min(N / 2 - 2, Math.floor((maxHz * N) / fs));
+    const power = (k) => {
+      const i = (k + N) % N;
+      return re[i] * re[i] + im[i] * im[i];
+    };
+    let best = 0,
+      bestPower = -1;
+    const values = [];
+    for (let k = -bins; k <= bins; k++) {
+      const p = power(k);
+      values.push(p);
+      if (p > bestPower) {
+        bestPower = p;
+        best = k;
+      }
+    }
+    const lg = (p) => Math.log(p + 1e-300);
+    const frac = parabolic(lg(power(best - 1)), lg(bestPower), lg(power(best + 1)));
+    values.sort((x, y) => x - y);
+    const median = values[values.length >> 1] || 1e-300;
+    return { hz: ((best + frac) * fs) / N, quality: bestPower / median };
+  }
+
+  function rotate(x, hz, fs) {
+    const n = x.re.length,
+      re = new Float64Array(n),
+      im = new Float64Array(n),
+      w = (TAU * hz) / fs;
+    for (let j = 0; j < n; j++) {
+      const c = Math.cos(w * j),
+        s = Math.sin(w * j);
+      re[j] = x.re[j] * c - x.im[j] * s;
+      im[j] = x.re[j] * s + x.im[j] * c;
+    }
+    return { re, im };
+  }
+
+  const energy = (x) => {
+    let e = 0;
+    for (let j = 0; j < x.re.length; j++) e += x.re[j] * x.re[j] + x.im[j] * x.im[j];
+    return e;
+  };
+
+  // r[k] = sum_t a[t+k] * conj(b[t]). A peak at lag k means a[t+k] matches b[t],
+  // i.e. the event appears k samples later in capture A than in capture B.
+  function crossCorrelate(a, b, maxLag = Infinity) {
+    const n = Math.min(a.re.length, b.re.length),
+      N = nextPow2(2 * n),
+      ar = new Float64Array(N),
+      ai = new Float64Array(N),
+      br = new Float64Array(N),
+      bi = new Float64Array(N);
+    ar.set(a.re.subarray(0, n));
+    ai.set(a.im.subarray(0, n));
+    br.set(b.re.subarray(0, n));
+    bi.set(b.im.subarray(0, n));
+    fft(ar, ai);
+    fft(br, bi);
+    for (let k = 0; k < N; k++) {
+      const r = ar[k] * br[k] + ai[k] * bi[k],
+        i = ai[k] * br[k] - ar[k] * bi[k];
+      ar[k] = r;
+      ai[k] = i;
+    }
+    fft(ar, ai, true);
+    const norm = Math.sqrt(energy(a) * energy(b)) || 1;
+    const limit = Math.min(n - 1, maxLag);
+    const lags = new Int32Array(2 * limit + 1),
+      magnitude = new Float64Array(2 * limit + 1);
+    let best = 0;
+    for (let k = -limit; k <= limit; k++) {
+      const i = (k + N) % N,
+        m = Math.hypot(ar[i], ai[i]) / N / norm;
+      lags[k + limit] = k;
+      magnitude[k + limit] = m;
+      if (m > magnitude[best]) best = k + limit;
+    }
+    const at = (i) => magnitude[Math.max(0, Math.min(magnitude.length - 1, i))];
+    const frac = parabolic(at(best - 1), at(best), at(best + 1));
+    const peak = (best - limit + N) % N;
+    let floor = 0;
+    for (const m of magnitude) floor += m;
+    floor /= magnitude.length || 1;
+    // Coarse estimate: a strong tone flattens this curve and can bias the
+    // peak by a few samples. crossSpectrum() refines the delay.
+    return {
+      lags,
+      magnitude, // normalized |r|, 1 for identical signals
+      lag: best - limit + frac,
+      lagInt: best - limit,
+      phase: Math.atan2(ai[peak], ar[peak]),
+      coherence: magnitude[best],
+      peakToFloor: magnitude[best] / (floor || 1e-300),
+    };
+  }
+
+  // Welch cross spectrum of a and b after removing the lag found by
+  // crossCorrelate (integer part by shifting, fractional part as a phase ramp).
+  // Bins are ordered from -fs/2 to +fs/2.
+  function crossSpectrum(a, b, lag, fs, nfft = 1024) {
+    const k = Math.round(lag),
+      frac = lag - k,
+      offA = Math.max(0, k),
+      offB = Math.max(0, -k),
+      len = Math.min(a.re.length - offA, b.re.length - offB);
+    nfft = Math.min(nfft, 2 ** Math.floor(Math.log2(Math.max(2, len))));
+    const w = hann(nfft),
+      hop = nfft / 2,
+      sabRe = new Float64Array(nfft),
+      sabIm = new Float64Array(nfft),
+      saa = new Float64Array(nfft),
+      sbb = new Float64Array(nfft),
+      xr = new Float64Array(nfft),
+      xi = new Float64Array(nfft),
+      yr = new Float64Array(nfft),
+      yi = new Float64Array(nfft);
+    let segments = 0;
+    for (let s = 0; s + nfft <= len; s += hop, segments++) {
+      for (let j = 0; j < nfft; j++) {
+        xr[j] = w[j] * a.re[offA + s + j];
+        xi[j] = w[j] * a.im[offA + s + j];
+        yr[j] = w[j] * b.re[offB + s + j];
+        yi[j] = w[j] * b.im[offB + s + j];
+      }
+      fft(xr, xi);
+      fft(yr, yi);
+      for (let j = 0; j < nfft; j++) {
+        sabRe[j] += xr[j] * yr[j] + xi[j] * yi[j];
+        sabIm[j] += xi[j] * yr[j] - xr[j] * yi[j];
+        saa[j] += xr[j] * xr[j] + xi[j] * xi[j];
+        sbb[j] += yr[j] * yr[j] + yi[j] * yi[j];
+      }
+    }
+    // Shift to -fs/2..fs/2 and undo the residual fractional delay.
+    const out = {
+      freq: new Float64Array(nfft),
+      re: new Float64Array(nfft),
+      im: new Float64Array(nfft),
+      paa: new Float64Array(nfft),
+      pbb: new Float64Array(nfft),
+      segments,
+      nfft,
+    };
+    for (let i = 0; i < nfft; i++) {
+      const j = (i + nfft / 2) % nfft,
+        f = ((i - nfft / 2) * fs) / nfft,
+        ph = (TAU * f * frac) / fs,
+        c = Math.cos(ph),
+        s = Math.sin(ph);
+      out.freq[i] = f;
+      out.re[i] = sabRe[j] * c - sabIm[j] * s;
+      out.im[i] = sabRe[j] * s + sabIm[j] * c;
+      out.paa[i] = saa[j];
+      out.pbb[i] = sbb[j];
+    }
+    // Refine the residual delay from the phase step between adjacent bins.
+    // Only wideband components carry delay information: a CW tone looks the
+    // same at every delay. So use runs of at least MIN_RUN contiguous coherent
+    // bins, each run with its own (cancelling) constant phase.
+    const MIN_RUN = 8,
+      gamma = new Float64Array(nfft);
+    for (let i = 0; i < nfft; i++)
+      gamma[i] = (out.re[i] ** 2 + out.im[i] ** 2) / (out.paa[i] * out.pbb[i] || 1e-300);
+    // Bins must also stand out from the noise floor (excludes window leakage).
+    const cross = Array.from(out.paa, (p, i) => Math.sqrt(p * out.pbb[i])).sort((x, y) => x - y),
+      floor = 4 * (cross[nfft >> 1] || 0);
+    const usable = (i) => gamma[i] >= 0.5 && Math.sqrt(out.paa[i] * out.pbb[i]) > floor;
+    let sr = 0,
+      si = 0,
+      runs = 0;
+    for (let i = 0; i < nfft; ) {
+      if (!usable(i)) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j + 1 < nfft && usable(j + 1)) j++;
+      // Effective number of bins (participation ratio): a tone and its window
+      // sidelobes concentrate the power in 2-3 bins, wideband signals do not.
+      let sum = 0,
+        sum2 = 0;
+      for (let k = i; k <= j; k++) {
+        const c = Math.sqrt(out.paa[k] * out.pbb[k]);
+        sum += c;
+        sum2 += c * c;
+      }
+      if (j - i + 1 >= MIN_RUN && (sum * sum) / (sum2 || 1e-300) >= MIN_RUN / 2) {
+        let pr = 0,
+          pi = 0;
+        for (let k = i; k < j; k++) {
+          pr += out.re[k + 1] * out.re[k] + out.im[k + 1] * out.im[k];
+          pi += out.im[k + 1] * out.re[k] - out.re[k + 1] * out.im[k];
+        }
+        const m = Math.hypot(pr, pi) || 1;
+        sr += (pr / m) * (j - i);
+        si += (pi / m) * (j - i);
+        runs++;
+      }
+      i = j + 1;
+    }
+    const residual = runs ? (-Math.atan2(si, sr) * nfft) / TAU : 0;
+    for (let i = 0; i < nfft; i++) {
+      const ph = (TAU * out.freq[i] * residual) / fs,
+        c = Math.cos(ph),
+        s = Math.sin(ph),
+        r = out.re[i] * c - out.im[i] * s;
+      out.im[i] = out.re[i] * s + out.im[i] * c;
+      out.re[i] = r;
+    }
+    out.coherence = gamma;
+    out.delayRuns = runs;
+    out.lag = lag + residual;
+    return out;
+  }
+
+  // Phase and coherence of the cross spectrum inside one frequency band.
+  function bandPhase(cs, centerHz, widthHz) {
+    let re = 0,
+      im = 0,
+      pa = 0,
+      pb = 0,
+      bins = 0;
+    for (let i = 0; i < cs.freq.length; i++) {
+      if (Math.abs(cs.freq[i] - centerHz) > widthHz / 2) continue;
+      re += cs.re[i];
+      im += cs.im[i];
+      pa += cs.paa[i];
+      pb += cs.pbb[i];
+      bins++;
+    }
+    const coherence = pa && pb ? (re * re + im * im) / (pa * pb) : 0;
+    return { phase: Math.atan2(im, re), coherence, powerA: pa, powerB: pb, bins };
+  }
+
+  // Angle of arrival from the phase difference between two antennas at
+  // spacing d (m). Positive angles point towards antenna A. NaN if ambiguous.
+  function angleFromPhase(dphi, freqHz, baselineM) {
+    const s = (wrap(dphi) * C) / (TAU * freqHz * baselineM);
+    return Math.abs(s) <= 1 ? (Math.asin(s) * 180) / Math.PI : NaN;
+  }
+
+  function circularMean(phases) {
+    let re = 0,
+      im = 0;
+    for (const p of phases) {
+      re += Math.cos(p);
+      im += Math.sin(p);
+    }
+    const n = phases.length || 1,
+      r = Math.hypot(re, im) / n;
+    return { mean: Math.atan2(im, re), r, std: r > 0 ? Math.sqrt(-2 * Math.log(Math.min(1, r))) : Infinity };
+  }
+
+  // Complete analysis of one snapshot pair.
+  function analyze(iqA, iqB, fs, opt = {}) {
+    const a = fromInterleaved(iqA),
+      b0 = fromInterleaved(iqB);
+    const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3);
+    const b = rotate(b0, cfo.hz, fs);
+    const xc = crossCorrelate(a, b, opt.maxLag ?? Infinity);
+    // Re-align the data with each refined delay until it settles.
+    let cs = crossSpectrum(a, b, xc.lag, fs, opt.nfft ?? 1024);
+    for (let j = 0; j < 6; j++) {
+      const next = crossSpectrum(a, b, cs.lag, fs, opt.nfft ?? 1024),
+        done = Math.abs(next.lag - cs.lag) < 0.005;
+      cs = next;
+      if (done) break;
+    }
+    const ref = bandPhase(cs, opt.refHz ?? 0, opt.refWidthHz ?? fs);
+    const target = bandPhase(cs, opt.targetHz ?? 0, opt.targetWidthHz ?? fs);
+    const dphi = wrap(target.phase - ref.phase - (opt.calibration ?? 0));
+    const angle = opt.baselineM ? angleFromPhase(dphi, opt.rfHz + (opt.targetHz ?? 0), opt.baselineM) : NaN;
+    return { cfo, xc, cs, ref, target, dphi, angle, a, b };
+  }
+
+  // Envelope |x|^2 reduced to `points` maxima for display.
+  function envelope(x, points = 800) {
+    const n = x.re.length,
+      out = new Float64Array(Math.min(points, n)),
+      step = n / out.length;
+    for (let i = 0; i < out.length; i++) {
+      let m = 0;
+      for (let j = Math.floor(i * step); j < Math.floor((i + 1) * step); j++)
+        m = Math.max(m, x.re[j] * x.re[j] + x.im[j] * x.im[j]);
+      out[i] = m;
+    }
+    return out;
+  }
+
+  const api = {
+    C,
+    nextPow2,
+    wrap,
+    fft,
+    hann,
+    fromInterleaved,
+    estimateCfo,
+    rotate,
+    crossCorrelate,
+    crossSpectrum,
+    bandPhase,
+    angleFromPhase,
+    circularMean,
+    analyze,
+    envelope,
+  };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.DualDSP = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
