@@ -96,41 +96,72 @@
     return d < 0 ? Math.max(-0.5, Math.min(0.5, (0.5 * (ym - yp)) / d)) : 0;
   }
 
-  // Frequency offset between the two local oscillators. The product a*conj(b)
-  // turns every signal both receivers see into a tone at the LO difference.
+  // Frequency offset between the two local oscillators. The product
+  // a[t+k]*conj(b[t]) turns every signal both receivers see into a tone at the
+  // LO difference, but only near the right time offset k: wideband signals
+  // decorrelate within a sample or two. So search k in [-maxLag, maxLag]
+  // (cross-ambiguity function), then refine the frequency at the best k.
   // Returns hz such that b * exp(+j*2*pi*hz*t) is frequency-aligned with a.
-  function estimateCfo(a, b, fs, maxHz = 100e3) {
-    const n = Math.min(a.re.length, b.re.length),
-      N = nextPow2(n) * 4,
+  function cfoSpectrum(a, b, k, N, w) {
+    // Same length (that of the window) for every k, so scores are comparable.
+    const n = Math.min(w.length, Math.min(a.re.length, b.re.length) - Math.abs(k)),
+      offA = Math.max(0, k),
+      offB = Math.max(0, -k),
       re = new Float64Array(N),
-      im = new Float64Array(N),
-      w = hann(n);
+      im = new Float64Array(N);
     for (let j = 0; j < n; j++) {
-      re[j] = w[j] * (a.re[j] * b.re[j] + a.im[j] * b.im[j]);
-      im[j] = w[j] * (a.im[j] * b.re[j] - a.re[j] * b.im[j]);
+      const ar = a.re[offA + j],
+        ai = a.im[offA + j],
+        br = b.re[offB + j],
+        bi = b.im[offB + j];
+      re[j] = w[j] * (ar * br + ai * bi);
+      im[j] = w[j] * (ai * br - ar * bi);
     }
     fft(re, im);
-    const bins = Math.min(N / 2 - 2, Math.floor((maxHz * N) / fs));
-    const power = (k) => {
-      const i = (k + N) % N;
-      return re[i] * re[i] + im[i] * im[i];
+    return { re, im };
+  }
+  function estimateCfo(a, b, fs, maxHz = 100e3, maxLag = 32) {
+    const n0 = Math.min(a.re.length, b.re.length);
+    maxLag = Math.max(0, Math.min(maxLag, n0 >> 2));
+    const n = n0 - maxLag,
+      w = hann(n);
+    const peakIn = ({ re, im }, N) => {
+      const bins = Math.min(N / 2 - 2, Math.floor((maxHz * N) / fs)),
+        power = (k) => {
+          const i = (k + N) % N;
+          return re[i] * re[i] + im[i] * im[i];
+        };
+      let best = 0,
+        bestPower = -1,
+        sum = 0;
+      for (let k = -bins; k <= bins; k++) {
+        const p = power(k);
+        sum += p;
+        if (p > bestPower) {
+          bestPower = p;
+          best = k;
+        }
+      }
+      return { best, bestPower, mean: sum / (2 * bins + 1), power };
     };
-    let best = 0,
-      bestPower = -1;
-    const values = [];
-    for (let k = -bins; k <= bins; k++) {
-      const p = power(k);
-      values.push(p);
-      if (p > bestPower) {
-        bestPower = p;
-        best = k;
+    // Coarse search over the time offset at the plain FFT resolution.
+    const N1 = nextPow2(n);
+    let bestLag = 0,
+      bestScore = -1;
+    for (let k = -maxLag; k <= maxLag; k++) {
+      const pk = peakIn(cfoSpectrum(a, b, k, N1, w), N1),
+        score = pk.bestPower / (pk.mean || 1e-300);
+      if (score > bestScore) {
+        bestScore = score;
+        bestLag = k;
       }
     }
-    const lg = (p) => Math.log(p + 1e-300);
-    const frac = parabolic(lg(power(best - 1)), lg(bestPower), lg(power(best + 1)));
-    values.sort((x, y) => x - y);
-    const median = values[values.length >> 1] || 1e-300;
-    return { hz: ((best + frac) * fs) / N, quality: bestPower / median };
+    // Fine frequency with zero padding at the best time offset.
+    const N = N1 * 4,
+      pk = peakIn(cfoSpectrum(a, b, bestLag, N, w), N);
+    const lg = (x) => Math.log(x + 1e-300);
+    const frac = parabolic(lg(pk.power(pk.best - 1)), lg(pk.bestPower), lg(pk.power(pk.best + 1)));
+    return { hz: ((pk.best + frac) * fs) / N, quality: pk.bestPower / (pk.mean || 1e-300), lag: bestLag };
   }
 
   function rotate(x, hz, fs) {
@@ -273,10 +304,23 @@
       gamma = new Float64Array(nfft);
     for (let i = 0; i < nfft; i++)
       gamma[i] = (out.re[i] ** 2 + out.im[i] ** 2) / (out.paa[i] * out.pbb[i] || 1e-300);
-    // Bins must also stand out from the noise floor (excludes window leakage).
-    const cross = Array.from(out.paa, (p, i) => Math.sqrt(p * out.pbb[i])).sort((x, y) => x - y),
-      floor = 4 * (cross[nfft >> 1] || 0);
-    const usable = (i) => gamma[i] >= 0.5 && Math.sqrt(out.paa[i] * out.pbb[i]) > floor;
+    // Narrowband peaks (CW tones) carry no delay information and would
+    // dominate the power-weighted slope, even inside a wideband signal. A
+    // windowed tone falls off steeply beyond +-2 bins, a wideband signal does
+    // not: mask bins more than 10 dB above both sides 3-6 bins away, and
+    // their neighbours.
+    const cross = Array.from(out.paa, (p, i) => Math.sqrt(p * out.pbb[i])),
+      tonal = new Uint8Array(nfft);
+    const side = (from, to) => {
+      const v = cross.slice(Math.max(0, from), Math.max(0, Math.min(nfft, to))).sort((x, y) => x - y);
+      return v.length ? v[v.length >> 1] : 0;
+    };
+    for (let i = 0; i < nfft; i++) {
+      const around = Math.max(side(i - 6, i - 2), side(i + 3, i + 7));
+      if (cross[i] > 10 * around)
+        for (let k = Math.max(0, i - 2); k <= Math.min(nfft - 1, i + 2); k++) tonal[k] = 1;
+    }
+    const usable = (i) => gamma[i] >= 0.5 && !tonal[i];
     let sr = 0,
       si = 0,
       runs = 0;
@@ -367,7 +411,7 @@
   function analyze(iqA, iqB, fs, opt = {}) {
     const a = fromInterleaved(iqA),
       b0 = fromInterleaved(iqB);
-    const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3);
+    const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3, opt.cfoLagSearch ?? 32);
     const b = rotate(b0, cfo.hz, fs);
     const xc = crossCorrelate(a, b, opt.maxLag ?? Infinity);
     // Re-align the data with each refined delay until it settles.

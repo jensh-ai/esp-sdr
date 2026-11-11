@@ -4,6 +4,11 @@
 
 ### Try it yourself: [Project overview](https://espargos.net/espsdr/) · [Browser SDR viewer](https://espargos.net/espsdr/app/) · [Browser firmware installer](https://espargos.net/espsdr/app/flash.html)
 
+> **This fork** adds a [dual-receiver correlator web app](webapp/README.md)
+> for phase and angle-of-arrival measurements with two ESP32-C3 boards, a
+> GPIO-triggered capture command (`TCAP`, see [docs/protocol.md](docs/protocol.md))
+> and a fast ESP32-C3-only CI build.
+
 ESP-SDR turns the Wi-Fi/Bluetooth radio of an ordinary ESP32 board into a
 receive-only software-defined radio. The firmware captures raw I/Q samples from
 the chip's own receiver and sends them to your computer over USB or UART.

@@ -173,6 +173,67 @@ test('flags missing delay information when only CW tones are present', () => {
   assert.ok(Math.abs(r.dphi) < 0.05, `dphi ${r.dphi}`);
 });
 
+test('uses a signal that fills the whole band for the delay', () => {
+  const fs = 80e6,
+    n = 8192,
+    rand = rng(3),
+    src = { re: new Float64Array(n + 16), im: new Float64Array(n + 16) };
+  for (let j = 0; j < n + 16; j++) {
+    src.re[j] = 0.2 * gauss(rand);
+    src.im[j] = 0.2 * gauss(rand);
+  }
+  const iqA = new Float32Array(2 * n),
+    iqB = new Float32Array(2 * n);
+  for (let j = 0; j < n; j++) {
+    // Receiver B with a -30 kHz LO offset (b = s * exp(-j*2*pi*30e3*t)).
+    const p = (-2 * Math.PI * 30e3 * j) / fs;
+    iqA[2 * j] = src.re[j + 5];
+    iqA[2 * j + 1] = src.im[j + 5];
+    iqB[2 * j] = src.re[j] * Math.cos(p) - src.im[j] * Math.sin(p);
+    iqB[2 * j + 1] = src.re[j] * Math.sin(p) + src.im[j] * Math.cos(p);
+  }
+  const r = dsp.analyze(iqA, iqB, fs, {});
+  assert.ok(Math.abs(r.cfo.hz - 30e3) < 300, `cfo ${r.cfo.hz}`);
+  assert.ok(r.cs.delayRuns >= 1, 'wideband run found');
+  assert.ok(Math.abs(r.cs.lag + 5) < 0.05, `lag ${r.cs.lag}`);
+});
+
+test('strong tone inside a wideband signal does not bias the delay', () => {
+  const fs = 80e6,
+    n = 16380,
+    rand = rng(11),
+    len = n + 16,
+    src = { re: new Float64Array(len), im: new Float64Array(len) };
+  for (let j = 0; j < len; j++) {
+    const w = (-2 * Math.PI * 3e6 * j) / fs;
+    src.re[j] = 0.1 * gauss(rand) + 0.2 * Math.cos(w);
+    src.im[j] = 0.1 * gauss(rand) + 0.2 * Math.sin(w);
+  }
+  for (const [lag, refPhase] of [
+    [3, 0.6],
+    [-6, -1.2],
+  ]) {
+    const iqA = new Float32Array(2 * n),
+      iqB = new Float32Array(2 * n);
+    for (let j = 0; j < n; j++) {
+      const ja = j + 8 + lag,
+        jb = j + 8,
+        w = (-2 * Math.PI * 3e6 * jb) / fs;
+      iqA[2 * j] = src.re[ja];
+      iqA[2 * j + 1] = src.im[ja];
+      // B: tone with an extra geometric phase, then a 20 kHz LO offset.
+      let re = src.re[jb] + 0.2 * (Math.cos(w + refPhase) - Math.cos(w)),
+        im = src.im[jb] + 0.2 * (Math.sin(w + refPhase) - Math.sin(w));
+      const p = (-2 * Math.PI * 20e3 * j) / fs;
+      iqB[2 * j] = re * Math.cos(p) - im * Math.sin(p);
+      iqB[2 * j + 1] = re * Math.sin(p) + im * Math.cos(p);
+    }
+    const r = dsp.analyze(iqA, iqB, fs, { refHz: -3e6, refWidthHz: 200e3, targetHz: 10e6, targetWidthHz: 10e6 });
+    assert.ok(Math.abs(r.cs.lag + lag) < 0.1, `lag ${r.cs.lag} vs ${-lag}`);
+    assert.ok(Math.abs(dsp.wrap(r.dphi - refPhase)) < 0.05, `dphi ${r.dphi} vs ${refPhase}`);
+  }
+});
+
 test('angle of arrival from phase difference', () => {
   const f = 2.44e9,
     d = 0.0625;

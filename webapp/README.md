@@ -15,6 +15,27 @@ ESP32-C3 boards), takes one I/Q snapshot from each, and cross-correlates them:
 It also contains the firmware installer (`flash.html`) with the prebuilt
 ESP32-C3 firmware in `firmware/`.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../docs/webapp-correlator-dark.png">
+  <img src="../docs/webapp-correlator-light.png" alt="Dual-SDR Correlator after 38 GPIO-triggered captures: metrics, power spectrum with reference and target bands, envelope, cross-correlation, cross-spectrum phase and phase history">
+</picture>
+
+*The screenshot shows two **emulated** receivers (a browser-side stand-in for
+the firmware protocol, not real hardware): wideband noise plus a CW reference
+at −3 MHz, receiver B with a 20 kHz LO offset, a 3-sample time offset and an
+extra 0.6 rad (34.4°) on the reference. The app recovers 20.00 kHz,
+−3.00 samples and Δφ = 34.3° with 0.8° spread over 38 captures.*
+
+How to read the plots:
+
+| Plot | What it shows |
+| --- | --- |
+| Power spectrum | Both receivers (blue A, orange B) with the reference (green) and target (purple) bands |
+| Envelope | Signal power over the snapshot; bursts should line up in both receivers |
+| Cross-correlation | Peak at the time offset between the snapshots; no clear peak means no common signal |
+| Cross-spectrum phase | Phase of A·B* per frequency after removing the time offset; coherent bins are highlighted. A flat line means the time offset is removed; a step between the bands is the measured Δφ |
+| History | Δφ (blue) and angle (orange) per capture |
+
 ## Hosting
 
 The app is static: serve this folder with any web server. Web Serial requires
