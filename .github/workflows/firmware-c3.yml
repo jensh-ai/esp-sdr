@@ -1,0 +1,98 @@
+name: Build firmware (ESP32-C3)
+
+# Fast single-target build for this fork. The full multi-target matrix in
+# firmware.yml only runs automatically in the upstream repository.
+
+on:
+  push:
+    paths:
+      - "main/**"
+      - "components/**"
+      - "CMakeLists.txt"
+      - "partitions.csv"
+      - "sdkconfig.defaults"
+      - "sdkconfig.defaults.esp32c3"
+      - "firmware-targets.json"
+      - "tools/build_firmware.py"
+      - "tools/export_web_firmware.py"
+      - ".github/workflows/firmware-c3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-c3-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROFILE: esp32c3
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Read pinned ESP-IDF commit
+        id: idf
+        run: |
+          ref=$(python3 -c "import json;print(next(p['idf_ref'] for p in json.load(open('firmware-targets.json'))['profiles'] if p['id']=='$PROFILE'))")
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      # ESP-IDF checkout plus toolchain dominate the build time; cache both.
+      - name: Cache ESP-IDF and tools
+        id: idf-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .esp-idf
+            ~/.espressif
+          key: idf-${{ runner.os }}-${{ steps.idf.outputs.ref }}-${{ env.PROFILE }}-v1
+
+      - name: Fetch pinned ESP-IDF (shallow)
+        if: steps.idf-cache.outputs.cache-hit != 'true'
+        run: |
+          git init -q .esp-idf
+          git -C .esp-idf remote add origin https://github.com/espressif/esp-idf
+          git -C .esp-idf fetch -q --depth 1 origin "${{ steps.idf.outputs.ref }}"
+          git -C .esp-idf checkout -q FETCH_HEAD
+          git -C .esp-idf submodule update --init --recursive --depth 1 --jobs 8
+
+      - name: Install SDK tools
+        if: steps.idf-cache.outputs.cache-hit != 'true'
+        run: .esp-idf/install.sh "$PROFILE"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ env.PROFILE }}-${{ steps.idf.outputs.ref }}-${{ github.sha }}
+          restore-keys: ccache-${{ env.PROFILE }}-${{ steps.idf.outputs.ref }}-
+
+      - name: Build and export
+        shell: bash
+        env:
+          IDF_CCACHE_ENABLE: "1"
+        run: |
+          source .esp-idf/export.sh > /dev/null
+          python tools/build_firmware.py --profile "$PROFILE" --version "$GITHUB_SHA" --output artifacts --jobs 4
+          cd "artifacts/$PROFILE"
+          python -m esptool --chip "$PROFILE" merge-bin -o "esp-sdr-$PROFILE-merged.bin" @flash_args
+          ls -l
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ env.PROFILE }}
+          path: artifacts/${{ env.PROFILE }}/
+          if-no-files-found: error
+          retention-days: 30

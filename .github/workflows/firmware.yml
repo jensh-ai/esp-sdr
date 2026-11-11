@@ -14,6 +14,9 @@ concurrency:
 
 jobs:
   targets:
+    # Forks build only ESP32-C3 automatically (firmware-c3.yml); start the
+    # full matrix manually via "Run workflow" when needed.
+    if: github.repository == 'ESPARGOS/esp-sdr' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.catalog.outputs.matrix }}
