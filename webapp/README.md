@@ -64,8 +64,10 @@ With the default **GPIO trigger**, both snapshots start on a shared wire:
 2. A raises the line, B listens. The app arms B first and only then lets A
    fire; see `TCAP` in [docs/protocol.md](../docs/protocol.md).
 
-The remaining start-time difference is a few samples and is measured from the
-data. That needs a wideband signal in both snapshots (a CW tone looks the same
+The remaining start-time difference is measured from the data (searched over
+±2048 samples, so offsets of several microseconds are found as well). Pairs
+without a common wideband signal, for example when nothing transmitted during
+the 205 µs snapshot, are shown but left out of the average. That needs a wideband signal in both snapshots (a CW tone looks the same
 at every delay): the app warns when there is none, because the phase
 difference between bands at different frequencies is then unreliable.
 

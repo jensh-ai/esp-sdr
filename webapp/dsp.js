@@ -120,10 +120,65 @@
     fft(re, im);
     return { re, im };
   }
-  function estimateCfo(a, b, fs, maxHz = 100e3, maxLag = 32) {
+  // Coarse time offset that tolerates the LO offset: correlate short segments
+  // (over which the LO difference turns the phase only a little) and add the
+  // segment correlations non-coherently. Searches k in [-maxLag, maxLag] with
+  // the same sign convention as crossCorrelate(): a[t+k] matches b[t].
+  function coarseLag(a, b, maxLag = 2048, seg = 256) {
+    const n = Math.min(a.re.length, b.re.length);
+    maxLag = Math.max(0, Math.min(maxLag, n - seg));
+    const N = nextPow2(seg + 2 * maxLag),
+      score = new Float64Array(2 * maxLag + 1),
+      ar = new Float64Array(N),
+      ai = new Float64Array(N),
+      br = new Float64Array(N),
+      bi = new Float64Array(N);
+    let segments = 0;
+    for (let s = 0; s + seg <= n; s += seg) {
+      ar.fill(0);
+      ai.fill(0);
+      br.fill(0);
+      bi.fill(0);
+      // a window [s - maxLag, s + seg + maxLag), zero outside the snapshot
+      for (let j = 0; j < seg + 2 * maxLag; j++) {
+        const t = s - maxLag + j;
+        if (t >= 0 && t < n) {
+          ar[j] = a.re[t];
+          ai[j] = a.im[t];
+        }
+      }
+      for (let j = 0; j < seg; j++) {
+        br[j] = b.re[s + j];
+        bi[j] = b.im[s + j];
+      }
+      fft(ar, ai);
+      fft(br, bi);
+      for (let k = 0; k < N; k++) {
+        const r = ar[k] * br[k] + ai[k] * bi[k],
+          i = ai[k] * br[k] - ar[k] * bi[k];
+        ar[k] = r;
+        ai[k] = i;
+      }
+      fft(ar, ai, true);
+      // index j of the result is lag j - maxLag
+      for (let k = 0; k <= 2 * maxLag; k++) score[k] += ar[k] * ar[k] + ai[k] * ai[k];
+      segments++;
+    }
+    let best = 0,
+      mean = 0;
+    for (let k = 0; k < score.length; k++) {
+      mean += score[k];
+      if (score[k] > score[best]) best = k;
+    }
+    mean /= score.length || 1;
+    return { lag: best - maxLag, quality: score[best] / (mean || 1e-300), segments };
+  }
+
+  function estimateCfo(a, b, fs, maxHz = 100e3, maxLag = 32, center = 0) {
     const n0 = Math.min(a.re.length, b.re.length);
     maxLag = Math.max(0, Math.min(maxLag, n0 >> 2));
-    const n = n0 - maxLag,
+    center = Math.max(-(n0 >> 2), Math.min(n0 >> 2, Math.round(center)));
+    const n = n0 - maxLag - Math.abs(center),
       w = hann(n);
     const peakIn = ({ re, im }, N) => {
       const bins = Math.min(N / 2 - 2, Math.floor((maxHz * N) / fs)),
@@ -148,7 +203,7 @@
     const N1 = nextPow2(n);
     let bestLag = 0,
       bestScore = -1;
-    for (let k = -maxLag; k <= maxLag; k++) {
+    for (let k = center - maxLag; k <= center + maxLag; k++) {
       const pk = peakIn(cfoSpectrum(a, b, k, N1, w), N1),
         score = pk.bestPower / (pk.mean || 1e-300);
       if (score > bestScore) {
@@ -411,7 +466,11 @@
   function analyze(iqA, iqB, fs, opt = {}) {
     const a = fromInterleaved(iqA),
       b0 = fromInterleaved(iqB);
-    const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3, opt.cfoLagSearch ?? 32);
+    // Time offsets of several microseconds occur between the two triggers, more
+    // than the CFO search covers on its own: find the region first.
+    const coarse = coarseLag(a, b0, opt.maxLagSearch ?? 2048);
+    const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3, opt.cfoLagSearch ?? 32, coarse.lag);
+    cfo.coarse = coarse;
     const b = rotate(b0, cfo.hz, fs);
     const xc = crossCorrelate(a, b, opt.maxLag ?? Infinity);
     // Re-align the data with each refined delay until it settles.
@@ -450,6 +509,7 @@
     fft,
     hann,
     fromInterleaved,
+    coarseLag,
     estimateCfo,
     rotate,
     crossCorrelate,

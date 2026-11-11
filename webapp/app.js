@@ -11,6 +11,7 @@
     busy = false,
     calibration = 0,
     history = [],
+    skipped = 0,
     lastPair = null,
     lastResult = null;
 
@@ -235,7 +236,17 @@
     const opt = analysisSettings(s.frequency);
     const r = DualDSP.analyze(iq[0], iq[1], s.rate, opt);
     r.clipped = iq.map((x) => clipped(x, s.bits));
+    r.level = iq.map((x) => levelLsb(x, s.bits));
     return r;
+  }
+  function isUsable(r) {
+    return r.cs.delayRuns > 0 && r.ref.coherence >= 0.5 && r.target.coherence >= 0.5;
+  }
+  // RMS level in LSB of the sample format, for the "only noise" hint.
+  function levelLsb(iq, bits) {
+    let e = 0;
+    for (let j = 0; j < iq.length; j++) e += iq[j] * iq[j];
+    return Math.sqrt(e / (iq.length / 2 || 1)) * (bits === 8 ? 128 : 512);
   }
   function clipped(iq, bits) {
     const limit = bits === 8 ? 127 / 128 : 511 / 512;
@@ -281,7 +292,11 @@
   function process(pair) {
     lastPair = pair;
     lastResult = analyzePair(pair);
-    history.push({ dphi: lastResult.dphi + calibration, time: Date.now() });
+    // Only pairs with a common wideband signal give a usable phase difference;
+    // the others would only add noise to the average.
+    lastResult.usable = isUsable(lastResult);
+    if (lastResult.usable) history.push({ dphi: lastResult.dphi + calibration, time: Date.now() });
+    else skipped++;
     const keep = Math.max(1, Math.round(num('average'))) * 5;
     if (history.length > keep) history.splice(0, history.length - keep);
     render();
@@ -317,9 +332,15 @@
           ? 'GPIO, late edge'
           : `GPIO (${fmt(trig[1].waitUs / 1e3, 1, ' ms')} wait)`
         : 'software';
-    $('m-count').textContent = String(history.length);
+    $('m-count').textContent = skipped ? `${history.length} (+${skipped} skipped)` : String(history.length);
 
     const warn = [];
+    if (!r.usable) warn.push('This pair is not used for the average.');
+    const quiet = s.bits === 8 ? 10 : 40;
+    if (r.level.every((l) => l < quiet))
+      warn.push(
+        `Both snapshots contain only noise (RMS ${r.level.map((l) => l.toFixed(1)).join(' / ')} LSB): no transmission during the ${Math.round((s.samples / s.rate) * 1e6)} µs snapshot. Keep capturing (Start) or raise the gain.`,
+      );
     if (r.cs.delayRuns === 0)
       warn.push(
         'No wideband coherent signal: the sampling time offset cannot be measured, so the phase difference between bands at different frequencies is unreliable.',
@@ -623,6 +644,7 @@
   });
   $('reset-history').addEventListener('click', () => {
     history = [];
+    skipped = 0;
     render();
     updateButtons();
   });

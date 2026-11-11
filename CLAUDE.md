@@ -61,7 +61,11 @@ die Flanke in der Lücke kam). Master setzt die Leitung selbst und liest sie üb
 denselben Eingang zurück (gleiche Latenz). Fehler: `trigger_args`, `rate`,
 `trigger_pin`, `gain`, `trigger_busy`, `trigger_timeout` (max. 3000 ms).
 `burst_gpio_trigger_pin()` in `main/common/burst_gpio.c`. Doku: `docs/protocol.md`.
-**Auf Hardware noch nicht getestet**; Rest-Jitter (erwartet: zehn ns) ungemessen.
+Erster Hardware-Test (2026-11-11): Ablauf funktioniert, aber ~160 Samples (2 µs)
+Versatz, solange die Funktion aus dem Flash lief (Cache-Miss nach der
+Poll-Schleife). Seitdem `IRAM_ATTR` auf `acquire_iq_triggered`; Effekt auf
+Hardware noch ungemessen. Exportierte Paare ohne Sendung im 205-µs-Fenster
+enthalten nur Rauschen (RMS ~3–4 LSB bei Gain 40) und gehen nicht in die Mittelung.
 
 ## WebApp (`webapp/`, statisch, kein Build)
 
@@ -72,7 +76,9 @@ denselben Eingang zurück (gleiche Latenz). Fehler: `trigger_args`, `rate`,
   `flash.html` + `flasher/`: Web-Flasher (esptool-js), lädt `firmware/manifest.json`.
 - `dsp.js` (Browser + Node), Pipeline in `analyze()`:
   1. DC entfernen.
-  2. LO-Versatz (CFO): Peak von FFT(a[t+k]·b*[t]), Suche über k = ±32 Samples
+  2. Grober Zeitversatz CFO-tolerant (`coarseLag`: 256-Sample-Segmente
+     korrelieren, Beträge inkohärent summieren, ±2048 Samples).
+     LO-Versatz (CFO): Peak von FFT(a[t+k]·b*[t]), Suche über k = Grob-Lag ±32
      (Kreuz-Ambiguität), dann Feinsuche mit Zero-Padding. b um +CFO drehen.
   3. Grober Lag aus normaler Kreuzkorrelation (wird von CW-Tönen verfälscht).
   4. Welch-Kreuzspektrum (nfft 1024 ist am genauesten), Feinschätzung des Lags

@@ -146,6 +146,26 @@ test('result does not depend on LO offset sign or larger delays', () => {
   }
 });
 
+test('finds time offsets of hundreds of samples between the triggers', () => {
+  // Measured on two ESP32-C3 with the flash-resident trigger loop: ~160 samples.
+  for (const [cfo, tau] of [
+    [12e3, 161.4],
+    [-60e3, -517.8],
+  ]) {
+    const s = scenario({ cfo, tau, phiRef: 0.4, phiTgt: -1.3 });
+    const r = dsp.analyze(s.iqA, s.iqB, s.fs, {
+      refHz: s.refHz,
+      refWidthHz: 200e3,
+      targetHz: s.tgtHz,
+      targetWidthHz: 2e6,
+    });
+    assert.ok(Math.abs(r.cfo.hz - cfo) < 300, `cfo ${r.cfo.hz} vs ${cfo}`);
+    assert.ok(Math.abs(r.cs.lag + tau) < 0.15, `lag ${r.cs.lag} vs ${-tau}`);
+    const expected = dsp.wrap(-1.3 - 0.4);
+    assert.ok(Math.abs(dsp.wrap(r.dphi - expected)) < 0.08, `cfo ${cfo} tau ${tau}: dphi ${r.dphi} vs ${expected}`);
+  }
+});
+
 test('flags missing delay information when only CW tones are present', () => {
   const fs = 80e6,
     n = 8192,

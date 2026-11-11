@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "driver/usb_serial_jtag.h"
+#include "esp_attr.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
@@ -116,7 +117,10 @@ typedef struct {
 /* Poll iterations per interrupt-free window, roughly 1 ms on the C3. */
 #define TRIGGER_WINDOW_SPINS 10000u
 
-static bool acquire_iq_triggered(unsigned n, unsigned divider, unsigned *capture_us, capture_trigger_t *trig) {
+/* In IRAM: from flash, the instructions after the polling loop can miss the
+ * cache, which delays the dump start by a few microseconds, differently on
+ * each board (seen as ~160-sample offsets between two triggered captures). */
+static IRAM_ATTR bool acquire_iq_triggered(unsigned n, unsigned divider, unsigned *capture_us, capture_trigger_t *trig) {
     if (divider != 0 && divider != 1 && divider != 6) {
         reply("ERR rate\n");
         return false;
