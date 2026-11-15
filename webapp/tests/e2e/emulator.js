@@ -82,7 +82,7 @@
       let m;
       if ((m = /^SYNC (\d+)$/.exec(line))) return this.send(`SYNC ${m[1]}\n`);
       if (line === 'INFO') return this.send('C3SDR 6 burst 16380\n');
-      if (line === 'CAPS') return this.send('CAPS VERSION GPIO UARTBAUD RXLIMITS SERIALLEASE TUNEEXT GAIN HWAGC IQ8 TCAP REFTX\n');
+      if (line === 'CAPS') return this.send('CAPS VERSION GPIO UARTBAUD RXLIMITS SERIALLEASE TUNEEXT GAIN HWAGC IQ8 TCAP REFTX SNIFF\n');
       if (line === 'TRANSPORT?') return this.send('TRANSPORT USB 0\n');
       if (line === 'RANGE?') return this.send('RANGE 1850 2650 1\n');
       if (line === 'LIMITS?') return this.send('LIMITS {"gain":[0,79,1],"bandwidth":null,"rates":[80000000,40000000,16000000],"bits":[8,10]}\n');
@@ -112,6 +112,16 @@
           dev.send(`DATA ${n} ${crc32(p).toString(16)} 205\n`);
           dev.send(p);
         }
+        return;
+      }
+      if ((m = /^SNIFF (\d+) (\d+)$/.exec(line))) {
+        shared.lastSniff = line;
+        setTimeout(() => {
+          this.send('STA 3C:A6:2F:11:22:33 412 -41 -38 AM -\n');
+          this.send('STA 5A:11:22:33:44:55 87 -55 -49 DM 3C:A6:2F:11:22:33\n');
+          this.send('STA 24:0A:C4:00:00:07 12 -63 -60 M -\n');
+          this.send('END 511 3\n');
+        }, Math.min(+m[2], 200));
         return;
       }
       if ((m = /^REFTX (\d+) (-?\d+) (\d+) (\d+) (\d+) ([NP]) ((?:[0-9A-F]{2}:){5}[0-9A-F]{2})$/.exec(line))) {

@@ -191,6 +191,19 @@ reference signal into every snapshot (`REFTX` in
 5. Keep the TX power low (2 dBm) and the transmitter some distance away, so
    that the receivers do not clip.
 
+**Finding a target address:** *Find devices on this channel* listens on the
+Wi-Fi channel (with the reference transmitter, or a receiver if none is
+connected) and lists every transmitter with its frames and RSSI. *Use* copies
+the address into *Target MAC*. Notes:
+
+- Phones and laptops use a private (randomized) address per network, marked
+  *random*. They acknowledge only the address they use right now, which is
+  the one in this list.
+- Idle phones sleep most of the time and miss frames. Access points are always
+  awake, and devices with traffic (many frames) answer reliably.
+
+<img src="../docs/webapp-device-list.png" alt="Device list with an access point, a station with a random address and a device sending only management frames" width="640">
+
 Only address your own devices.
 
 <img src="../docs/webapp-reference-tx.png" alt="Reference transmitter mode with emulated boards: frame at 35–65 µs (reference, green) and ACK at 75–105 µs (target, purple) in the envelope plot" width="640">

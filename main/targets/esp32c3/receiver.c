@@ -64,11 +64,12 @@ static bool rx_ready;
 static bool frequency_valid(unsigned mhz) {
     return mhz >= C3_FREQ_MIN && mhz <= C3_FREQ_MAX;
 }
+/* Reset when Wi-Fi restarts (REFTX, SNIFF): the PHY then loses the RX calibration. */
+static unsigned rx_calibrated_mhz;
 static void tune_rx(unsigned mhz) {
-    static unsigned calibrated_mhz;
-    if (calibrated_mhz != mhz || rx_recalibration_stale()) {
+    if (rx_calibrated_mhz != mhz || rx_recalibration_stale()) {
         rx_recalibrate(mhz);
-        calibrated_mhz = mhz;
+        rx_calibrated_mhz = mhz;
     }
     rx_lo_plan_t plan = rx_lo_plan(mhz);
     bool channel = (mhz >= 2412 && mhz <= 2472 && (mhz - 2412) % 5 == 0) || mhz == 2484;
@@ -321,6 +322,7 @@ static bool reftx_setup(int rate) {
     if (reftx_configured_rate == rate) return true;
     if (!reftx_sem && !(reftx_sem = xSemaphoreCreateBinary())) return false;
     reftx_configured_rate = -1;
+    rx_calibrated_mhz = 0;
     (void)esp_wifi_stop();
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
         esp_wifi_config_80211_tx_rate(WIFI_IF_STA, (wifi_phy_rate_t)rate) != ESP_OK || esp_wifi_start() != ESP_OK)
@@ -422,6 +424,124 @@ static bool reftx_command(const char *line) {
     return true;
 }
 
+/* SNIFF <channel> <ms>: list the transmitters heard on a Wi-Fi channel, to
+ * find a target address for REFTX. Restarts Wi-Fi with automatic gain (the
+ * receiver setup forces the PHY), listens in promiscuous mode and replies one
+ * line per transmitter address, most frames first:
+ *   STA <mac> <frames> <rssi_avg> <rssi_max> <flags> <bssid|->
+ * flags: A = access point (beacon, probe response or from-DS data),
+ * D = data frames, M = management frames; bssid is the access point a
+ * station sent data to. Then END <frames> <addresses>. */
+#define SNIFF_MAX 48
+typedef struct {
+    uint8_t mac[6], bssid[6];
+    uint32_t frames;
+    int32_t rssi_sum;
+    int8_t rssi_max;
+    uint8_t flags; /* 1 = AP, 2 = data, 4 = management, 8 = bssid known */
+} sniff_entry_t;
+static sniff_entry_t sniff_table[SNIFF_MAX];
+static unsigned sniff_count;
+static uint32_t sniff_frames;
+static portMUX_TYPE sniff_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void sniff_rx(void *buf, wifi_promiscuous_pkt_type_t type) {
+    const wifi_promiscuous_pkt_t *pkt = buf;
+    const uint8_t *f = pkt->payload;
+    if ((type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) || pkt->rx_ctrl.sig_len < 24) return;
+    const uint8_t *from = f + 10;
+    uint8_t subtype = f[0] >> 4, ds = f[1] & 3, flags = type == WIFI_PKT_DATA ? 2 : 4;
+    if (type == WIFI_PKT_MGMT && (subtype == 8 || subtype == 5)) flags |= 1; /* beacon, probe response */
+    if (type == WIFI_PKT_DATA && ds == 2) flags |= 1;                        /* from DS: sent by the AP */
+    bool to_ap = type == WIFI_PKT_DATA && ds == 1;
+    int8_t rssi = pkt->rx_ctrl.rssi;
+    taskENTER_CRITICAL(&sniff_mux);
+    sniff_frames++;
+    sniff_entry_t *e = NULL;
+    for (unsigned j = 0; j < sniff_count; j++)
+        if (!memcmp(sniff_table[j].mac, from, 6)) {
+            e = &sniff_table[j];
+            break;
+        }
+    if (!e && sniff_count < SNIFF_MAX) {
+        e = &sniff_table[sniff_count++];
+        memset(e, 0, sizeof(*e));
+        memcpy(e->mac, from, 6);
+        e->rssi_max = -128;
+    }
+    if (e) {
+        e->frames++;
+        e->rssi_sum += rssi;
+        if (rssi > e->rssi_max) e->rssi_max = rssi;
+        e->flags |= flags;
+        if (to_ap) {
+            memcpy(e->bssid, f + 4, 6);
+            e->flags |= 8;
+        }
+    }
+    taskEXIT_CRITICAL(&sniff_mux);
+}
+
+static bool sniff_command(const char *line) {
+    unsigned channel, ms;
+    char extra;
+    if (strncmp(line, "SNIFF ", 6)) return false;
+    if (sscanf(line, "SNIFF %u %u %c", &channel, &ms, &extra) != 2 || channel < 1 || channel > 13 || ms < 10 ||
+        ms > 5000) {
+        reply("ERR sniff_args\n");
+        return true;
+    }
+    rx_ready = false;
+    rx_calibrated_mhz = 0;
+    reftx_configured_rate = -1;
+    (void)rx_gain_verified_apply(false, gain_code);
+    (void)esp_wifi_stop();
+    rx_lo_select(false);
+    wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
+    if (esp_wifi_start() != ESP_OK || esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK ||
+        esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
+        esp_wifi_set_promiscuous_filter(&filter) != ESP_OK || esp_wifi_set_promiscuous_rx_cb(sniff_rx) != ESP_OK) {
+        reply("ERR sniff_wifi\n");
+        return true;
+    }
+    taskENTER_CRITICAL(&sniff_mux);
+    sniff_count = 0;
+    sniff_frames = 0;
+    taskEXIT_CRITICAL(&sniff_mux);
+    vTaskDelay(pdMS_TO_TICKS(ms));
+    (void)esp_wifi_set_promiscuous_rx_cb(NULL);
+    taskENTER_CRITICAL(&sniff_mux);
+    unsigned count = sniff_count;
+    uint32_t frames = sniff_frames;
+    taskEXIT_CRITICAL(&sniff_mux);
+    /* Most frames first (the callback no longer writes the table). */
+    for (unsigned j = 1; j < count; j++)
+        for (unsigned k = j; k > 0 && sniff_table[k].frames > sniff_table[k - 1].frames; k--) {
+            sniff_entry_t t = sniff_table[k];
+            sniff_table[k] = sniff_table[k - 1];
+            sniff_table[k - 1] = t;
+        }
+    for (unsigned j = 0; j < count; j++) {
+        const sniff_entry_t *e = &sniff_table[j];
+        char flags[4] = {0}, bssid[18] = "-", answer[96];
+        unsigned n = 0;
+        if (e->flags & 1) flags[n++] = 'A';
+        if (e->flags & 2) flags[n++] = 'D';
+        if (e->flags & 4) flags[n++] = 'M';
+        if (e->flags & 8)
+            snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", e->bssid[0], e->bssid[1], e->bssid[2],
+                     e->bssid[3], e->bssid[4], e->bssid[5]);
+        snprintf(answer, sizeof(answer), "STA %02X:%02X:%02X:%02X:%02X:%02X %" PRIu32 " %d %d %s %s\n", e->mac[0],
+                 e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->frames,
+                 (int)(e->rssi_sum / (int32_t)e->frames), e->rssi_max, flags, bssid);
+        reply(answer);
+    }
+    char end[40];
+    snprintf(end, sizeof(end), "END %" PRIu32 " %u\n", frames, count);
+    reply(end);
+    return true;
+}
+
 #define BURST_ID       "C3SDR"
 #define BURST_MAX_RATE 6
 #include "burst_commands.h"
@@ -431,6 +551,7 @@ static void handle_command(char *line) {
     if (burst_gpio_command(line)) return;
     if (triggered_capture_command(line)) return;
     if (reftx_command(line)) return;
+    if (sniff_command(line)) return;
 #ifdef RING_PROBE
     if (ring_probe_command(line)) return;
 #endif
@@ -445,7 +566,7 @@ static void handle_command(char *line) {
 #if CONFIG_ESP_SDR_UART_ENABLED
               "DUALSERIAL "
 #endif
-              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 TCAP REFTX\n");
+              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 TCAP REFTX SNIFF\n");
     } else if (sscanf(line, "BANDWIDTH %u %c", &n, &extra) == 1 &&
                (!n || (n >= RX_BANDWIDTH_MIN && n <= RX_BANDWIDTH_MAX))) {
         rx_filter = rx_bandwidth_dcap(n);

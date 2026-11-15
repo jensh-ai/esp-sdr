@@ -137,6 +137,21 @@ Errors: `ERR reftx_args`, `ERR rate`, `ERR trigger_pin`, `ERR reftx_wifi`
 
 Only address your own devices: every frame is a real transmission.
 
+### Transmitter list (ESP32-C3, `SNIFF` in `CAPS`)
+
+`SNIFF <channel> <ms>` (channel 1 to 13, 10 to 5000 ms) lists the
+transmitters heard on a Wi-Fi channel, to pick a target address for `REFTX`.
+The board restarts Wi-Fi with automatic gain, listens to management and data
+frames in promiscuous mode, and replies one line per transmitter address
+(at most 48), most frames first:
+
+`STA <mac> <frames> <rssi-avg> <rssi-max> <flags> <bssid|->`
+
+`flags`: `A` access point (beacon, probe response or from-DS data), `D` data
+frames, `M` management frames. `bssid` is the access point a station sent
+data to. Then `END <frames> <addresses>`. Errors: `ERR sniff_args`,
+`ERR sniff_wifi`. The next capture on the board prepares the receiver again.
+
 The [S3 continuous stream](iq-stream.md) also sends `(I, -Q)` pairs.
 The separate [S31 streaming firmware](s31-streaming.md#iq-packets) sends
 `(I, Q)` pairs.

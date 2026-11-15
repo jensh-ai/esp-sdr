@@ -80,6 +80,13 @@ const server = http.createServer((req, res) => {
         await page.waitForFunction((n) => document.getElementById('status-' + n).textContent.includes('C3'), n);
       }
       check((await page.textContent('#status-R')).includes('REFTX'), 'reftx: transmitter reports REFTX');
+      await page.click('#sniff');
+      await page.waitForFunction(() => document.querySelectorAll('#sniff-body tr').length === 3);
+      check((await page.evaluate(() => window.__emu.lastSniff)) === 'SNIFF 7 1000', 'sniff: listens on the channel');
+      const rows = await page.$$eval('#sniff-body tr', (trs) => trs.map((tr) => tr.textContent));
+      check(rows[0].includes('access point') && rows[1].includes('random') && rows[1].includes('station of 3C:A6:2F:11:22:33'), 'sniff: device list');
+      await page.click('#sniff-body tr:nth-child(2) button');
+      check((await page.inputValue('#ref-mac')) === '5a:11:22:33:44:55', 'sniff: Use fills the target MAC');
       await page.selectOption('#trigger-mode', 'reftx');
       check((await page.inputValue('#analysis-mode')) === 'bursts', 'reftx: analysis switches to bursts');
       await page.fill('#ref-mac', '02:00:5e:10:00:01');

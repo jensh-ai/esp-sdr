@@ -79,6 +79,12 @@ einzustellen (Default 0), MAC-Wartezeit (CSMA) variiert. **Auf Hardware
 ungetestet**: ob der PHY nach der RX-Konfiguration (pbus) über esp_wifi_stop/
 start wieder sendet, ist offen.
 
+`SNIFF <channel> <ms>` (nur C3): Wi-Fi-Neustart mit AGC, Promiscuous
+(MGMT+DATA), Tabelle max. 48 Sender → `STA <mac> <frames> <rssi_avg>
+<rssi_max> <A|D|M> <bssid|->`, dann `END`. WebApp: „Find devices on this
+channel“ (Referenzsender oder Empfänger), „Use“ übernimmt die MAC. Nach
+REFTX/SNIFF wird `rx_calibrated_mhz` zurückgesetzt (RX neu kalibrieren).
+
 Schmale Spitzen im Spektrum auf einem 2-MHz-Raster (z. B. 2440/2444/2448 MHz)
 liegen in A und B bei identischem Offset trotz LO-Versatz → empfängerinterne
 Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).

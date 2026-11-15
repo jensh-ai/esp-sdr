@@ -46,6 +46,7 @@
       $('device-' + n).classList.toggle('connected', on);
     }
     const refOn = !!refDevice.radio.port;
+    $('sniff').disabled = busy || running || !sniffer();
     for (const id of ['ref-channel', 'ref-mac', 'ref-delay', 'ref-frame', 'ref-rate', 'ref-power'])
       $(id).disabled = running;
     $('device-R').classList.toggle('connected', refOn);
@@ -140,6 +141,7 @@
       const caps = (await r.line('CAPS')).split(' ');
       r.hasTriggeredCapture = caps.includes('TCAP');
       r.hasRefTx = caps.includes('REFTX');
+      r.hasSniff = caps.includes('SNIFF');
     });
   }
 
@@ -407,6 +409,98 @@
       if (!r.failed) await r.synchronize().catch(() => {});
       throw Error(`Reference transmitter: ${e.message}`);
     }
+  }
+
+  // ---------- device list (SNIFF) ----------
+  // The board that listens: the reference transmitter if connected, else a receiver.
+  const sniffer = () => [refDevice, devices.A, devices.B].find((d) => d.radio.port && d.radio.hasSniff);
+
+  async function findDevices() {
+    const dev = sniffer();
+    if (!dev) return;
+    const channel = Math.round(num('ref-channel')),
+      ms = Math.max(10, Math.min(3000, Math.round(num('sniff-ms'))));
+    busy = true;
+    updateButtons();
+    $('sniff-status').textContent = `Listening on channel ${channel} with ${roleLabel(dev.name).toLowerCase()}…`;
+    try {
+      const rows = await dev.radio.run(async () => {
+        const r = dev.radio,
+          out = [];
+        try {
+          await r.command(`SNIFF ${channel} ${ms}`);
+          for (;;) {
+            const line = await r.line('', 256),
+              m = /^STA ((?:[0-9A-F]{2}:){5}[0-9A-F]{2}) (\d+) (-?\d+) (-?\d+) ([ADM]*) (\S+)$/.exec(line);
+            if (m)
+              out.push({ mac: m[1], frames: +m[2], rssiAvg: +m[3], rssiMax: +m[4], flags: m[5], bssid: m[6] === '-' ? null : m[6] });
+            else if (/^END /.test(line)) return { rows: out, total: Number(line.split(' ')[1]) };
+            else throw Error(line);
+          }
+        } catch (e) {
+          if (!r.failed) await r.synchronize().catch(() => {});
+          throw e;
+        }
+      });
+      showDevices(rows.rows);
+      $('sniff-status').textContent = `${rows.rows.length} transmitters, ${rows.total} frames on channel ${channel}.`;
+    } catch (e) {
+      $('sniff-status').textContent = '';
+      message(`Device list: ${e.message || e}`, true);
+    } finally {
+      busy = false;
+      updateButtons();
+    }
+  }
+
+  function showDevices(rows) {
+    const body = $('sniff-body');
+    body.replaceChildren();
+    for (const row of rows) {
+      const tr = document.createElement('tr'),
+        cell = (content) => {
+          const td = document.createElement('td');
+          if (content instanceof Node) td.append(content);
+          else td.textContent = content;
+          tr.append(td);
+          return td;
+        };
+      const mac = document.createElement('span'),
+        code = document.createElement('code');
+      code.textContent = row.mac;
+      mac.append(code);
+      // Locally administered: usually a randomized (private) address.
+      if (parseInt(row.mac.slice(0, 2), 16) & 2) {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = 'random';
+        tag.title = 'Locally administered address, usually a private (randomized) MAC';
+        mac.append(tag);
+      }
+      cell(mac);
+      cell(String(row.frames));
+      cell(`${row.rssiAvg} / ${row.rssiMax} dBm`);
+      cell(
+        row.flags.includes('A')
+          ? 'access point'
+          : row.bssid
+            ? `station of ${row.bssid}`
+            : row.flags.includes('D')
+              ? 'station'
+              : 'management only',
+      );
+      const use = document.createElement('button');
+      use.className = 'secondary';
+      use.textContent = 'Use';
+      use.title = 'Use as target MAC';
+      use.addEventListener('click', () => {
+        $('ref-mac').value = row.mac.toLowerCase();
+        message(`Target MAC set to ${row.mac.toLowerCase()}.`);
+      });
+      cell(use);
+      body.append(tr);
+    }
+    $('sniff-results').hidden = !rows.length;
   }
 
   function analyzePair(pair) {
@@ -834,6 +928,7 @@
     $('disconnect-' + n).addEventListener('click', () => disconnect(n));
   }
   $('capture').addEventListener('click', captureOnce);
+  $('sniff').addEventListener('click', findDevices);
   $('run').addEventListener('click', () => {
     if (running) running = false;
     else runLoop();

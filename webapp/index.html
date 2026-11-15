@@ -146,6 +146,27 @@
           >
           <label>TX power (dBm)<input id="ref-power" type="number" value="2" min="2" max="20" step="1" /></label>
         </div>
+        <div class="row sniff-row">
+          <button id="sniff" class="secondary" disabled>Find devices on this channel</button>
+          <label class="inline"
+            >Listen (ms)<input id="sniff-ms" type="number" value="1000" min="10" max="3000" step="10"
+          /></label>
+          <span id="sniff-status" class="hint-inline"></span>
+        </div>
+        <div id="sniff-results" class="sniff-results" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th>MAC</th>
+                <th>Frames</th>
+                <th>RSSI avg / max</th>
+                <th>Type</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="sniff-body"></tbody>
+          </table>
+        </div>
         <p class="hint">
           A third board drives the trigger line and sends one 802.11 frame per capture: the reference. Addressed to a
           station (Target MAC), that station answers with an ACK 10 µs later: the target. The delay is measured from
