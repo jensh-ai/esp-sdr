@@ -64,12 +64,11 @@ static bool rx_ready;
 static bool frequency_valid(unsigned mhz) {
     return mhz >= C3_FREQ_MIN && mhz <= C3_FREQ_MAX;
 }
-/* Reset when Wi-Fi restarts (REFTX, SNIFF): the PHY then loses the RX calibration. */
-static unsigned rx_calibrated_mhz;
 static void tune_rx(unsigned mhz) {
-    if (rx_calibrated_mhz != mhz || rx_recalibration_stale()) {
+    static unsigned calibrated_mhz;
+    if (calibrated_mhz != mhz || rx_recalibration_stale()) {
         rx_recalibrate(mhz);
-        rx_calibrated_mhz = mhz;
+        calibrated_mhz = mhz;
     }
     rx_lo_plan_t plan = rx_lo_plan(mhz);
     bool channel = (mhz >= 2412 && mhz <= 2472 && (mhz - 2412) % 5 == 0) || mhz == 2484;
@@ -322,7 +321,6 @@ static bool reftx_setup(int rate) {
     if (reftx_configured_rate == rate) return true;
     if (!reftx_sem && !(reftx_sem = xSemaphoreCreateBinary())) return false;
     reftx_configured_rate = -1;
-    rx_calibrated_mhz = 0;
     (void)esp_wifi_stop();
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
         esp_wifi_config_80211_tx_rate(WIFI_IF_STA, (wifi_phy_rate_t)rate) != ESP_OK || esp_wifi_start() != ESP_OK)
@@ -492,7 +490,6 @@ static bool sniff_command(const char *line) {
         return true;
     }
     rx_ready = false;
-    rx_calibrated_mhz = 0;
     reftx_configured_rate = -1;
     (void)rx_gain_verified_apply(false, gain_code);
     (void)esp_wifi_stop();
