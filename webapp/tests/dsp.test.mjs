@@ -254,6 +254,72 @@ test('strong tone inside a wideband signal does not bias the delay', () => {
   }
 });
 
+// Reference frame and the ACK of the target on the same channel, at different
+// times: B sees each with its own extra phase.
+function burstScenario({ tau = 2.4, cfo = -23e3, phiRef = 0.7, phiTgt = -0.5, ack = true } = {}) {
+  const fs = 80e6,
+    n = 16380,
+    N = dsp.nextPow2(n),
+    rand = rng(7);
+  const frame = bandNoise(N, fs, 1e6, 18e6, rand),
+    reply = bandNoise(N, fs, 1e6, 18e6, rand);
+  const gate = (x, from, to, amp) => {
+    let p = 0;
+    for (let j = from; j < to; j++) p += x.re[j] ** 2 + x.im[j] ** 2;
+    const g = amp / Math.sqrt(p / (to - from));
+    const out = { re: new Float64Array(N), im: new Float64Array(N) };
+    for (let j = from; j < to; j++) {
+      out.re[j] = g * x.re[j];
+      out.im[j] = g * x.im[j];
+    }
+    return out;
+  };
+  const ref = gate(frame, 1600, 4000, 0.3),
+    tgt = ack ? gate(reply, 4800, 7200, 0.08) : { re: new Float64Array(N), im: new Float64Array(N) };
+  const sum = (phr, pht) => {
+    const out = { re: new Float64Array(N), im: new Float64Array(N) };
+    for (let j = 0; j < N; j++) {
+      out.re[j] = ref.re[j] * Math.cos(phr) - ref.im[j] * Math.sin(phr) + tgt.re[j] * Math.cos(pht) - tgt.im[j] * Math.sin(pht);
+      out.im[j] = ref.re[j] * Math.sin(phr) + ref.im[j] * Math.cos(phr) + tgt.re[j] * Math.sin(pht) + tgt.im[j] * Math.cos(pht);
+    }
+    return out;
+  };
+  const srcA = sum(0, 0),
+    srcB = delay(sum(-phiRef, -phiTgt), tau);
+  const toIq = (x, hz, phase) => {
+    const iq = new Float32Array(2 * n);
+    for (let j = 0; j < n; j++) {
+      const ph = phase - (TAU * hz * j) / fs,
+        c = Math.cos(ph),
+        si = Math.sin(ph);
+      iq[2 * j] = x.re[j] * c - x.im[j] * si + 0.005 * gauss(rand);
+      iq[2 * j + 1] = x.re[j] * si + x.im[j] * c + 0.005 * gauss(rand);
+    }
+    return iq;
+  };
+  return { fs, iqA: toIq(srcA, 0, 0), iqB: toIq(srcB, cfo, 1.9) };
+}
+
+test('reference frame and ACK at different times on the same channel', () => {
+  for (const tau of [2.4, -1.3, 37.6]) {
+    const s = burstScenario({ tau });
+    const r = dsp.analyze(s.iqA, s.iqB, s.fs, { mode: 'bursts', rfHz: 2442e6, baselineM: 0.06 });
+    assert.equal(r.bursts.length, 2, `bursts ${JSON.stringify(r.bursts)}`);
+    assert.ok(Math.abs(r.bursts[0].startUs - 20) < 1.5 && Math.abs(r.bursts[1].startUs - 60) < 1.5, 'burst times');
+    assert.ok(r.ref.coherence > 0.9 && r.target.coherence > 0.9, `coherence ${r.ref.coherence} ${r.target.coherence}`);
+    const expected = dsp.wrap(-0.5 - 0.7);
+    assert.ok(Math.abs(dsp.wrap(r.dphi - expected)) < 0.05, `tau ${tau}: dphi ${r.dphi} vs ${expected}`);
+  }
+});
+
+test('a broadcast reference without reply gives one burst and no target', () => {
+  const s = burstScenario({ ack: false });
+  const r = dsp.analyze(s.iqA, s.iqB, s.fs, { mode: 'bursts', rfHz: 2442e6 });
+  assert.equal(r.bursts.length, 1);
+  assert.equal(r.target.coherence, 0);
+  assert.ok(Number.isNaN(r.dphi));
+});
+
 test('angle of arrival from phase difference', () => {
   const f = 2.44e9,
     d = 0.0625;

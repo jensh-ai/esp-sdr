@@ -92,14 +92,50 @@ replies with several lines:
 
 Both receivers arm the dump engine first and then poll the line with
 interrupts disabled; the master raises the line and reads it back through the
-same input path, so both detect it with the same latency. The remaining
-jitter is expected to be in the order of one polling iteration (tens of ns),
-but has not been measured on hardware yet. The master lowers the line after
-its capture.
+same input path, so both detect it with the same latency. The polling and
+trigger code runs from IRAM: from flash, a cache miss after the loop delayed
+the start by about 2 µs (160 samples at 80 MS/s), differently on each board.
+Measured on two ESP32-C3 since then: 1 to 4 samples between the snapshots.
+The master lowers the line after its capture.
 
 Errors: `ERR trigger_args`, `ERR rate`, `ERR trigger_pin` (pin not available),
 `ERR gain`, `ERR trigger_busy` (listener sees the line high before arming),
 `ERR trigger_timeout` (no edge within `<timeout-ms>`, at most 3000).
+
+### Reference transmitter (ESP32-C3, `REFTX` in `CAPS`)
+
+`REFTX <pin> <delay-us> <channel> <mbps> <power> <N|P> <mac>`
+
+An optional third board drives the trigger line instead of receiver A: both
+receivers wait with `TCAP… S`. When both report `ARMED`, the host sends
+`REFTX`. The board raises the line and sends one 802.11 frame:
+
+- `<delay-us>` (−5000 to 5000): time from the trigger edge to handing the
+  frame to the Wi-Fi driver. Negative values queue the frame first and raise
+  the line `|delay-us|` later. The driver still waits for a free channel, so
+  the frame starts later than the hand-over, by a varying amount.
+- `<channel>` 1 to 13; `<mbps>` one of 1, 2, 5 (5.5), 11, 6, 9, 12, 18, 24,
+  36, 48, 54; `<power>` in 0.25 dBm, 8 to 84 (2 to 21 dBm).
+- `N`: null-data frame, `P`: probe request (wildcard SSID).
+- `<mac>`: receiver address, `FF:FF:FF:FF:FF:FF` for a broadcast. Another
+  station answers a frame addressed to it with an ACK one SIFS (10 µs) after
+  the frame. The frame is the reference and the ACK the target, both in the
+  same snapshot and on the same channel.
+
+Reply: `REFTX <acked> <queued-us> <done-us>`. `acked` is `1` when the driver
+reports a successful transmission (an ACK for unicast frames, always for
+broadcasts); `queued-us` and `done-us` are the hand-over and the driver's
+completion, relative to the trigger edge (`done-us` is `-1` without a report
+within 50 ms). The line stays high for at least 2 ms and is then released to
+an input with pull-down.
+
+The board switches Wi-Fi from NULL to station mode for this (once per rate),
+so the next capture on it prepares the receiver again.
+
+Errors: `ERR reftx_args`, `ERR rate`, `ERR trigger_pin`, `ERR reftx_wifi`
+(Wi-Fi setup failed), `ERR reftx_send <code>` (`esp_wifi_80211_tx` failed).
+
+Only address your own devices: every frame is a real transmission.
 
 The [S3 continuous stream](iq-stream.md) also sends `(I, -Q)` pairs.
 The separate [S31 streaming firmware](s31-streaming.md#iq-packets) sends

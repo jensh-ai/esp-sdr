@@ -204,8 +204,11 @@
     let bestLag = 0,
       bestScore = -1;
     for (let k = center - maxLag; k <= center + maxLag; k++) {
+      // Absolute peak power: every k uses the same window and nearly the same
+      // samples. (Peak/mean fails for short bursts, whose peak is several
+      // bins wide and dominates the mean.)
       const pk = peakIn(cfoSpectrum(a, b, k, N1, w), N1),
-        score = pk.bestPower / (pk.mean || 1e-300);
+        score = pk.bestPower;
       if (score > bestScore) {
         bestScore = score;
         bestLag = k;
@@ -462,6 +465,187 @@
     return { mean: Math.atan2(im, re), r, std: r > 0 ? Math.sqrt(-2 * Math.log(Math.min(1, r))) : Infinity };
   }
 
+  // Transmissions (bursts) in a snapshot pair: where the summed power of A and
+  // the time-aligned B stays above the noise floor by thresholdDb. Times are
+  // sample indices in A; b is assumed CFO-corrected, lag as in crossCorrelate().
+  function findBursts(a, b, lag, fs, { thresholdDb = 10, minUs = 2, mergeUs = 1, smoothUs = 0.4 } = {}) {
+    const n = a.re.length,
+      k = Math.round(lag),
+      p = new Float64Array(n);
+    for (let t = 0; t < n; t++) {
+      const u = t - k;
+      p[t] = a.re[t] * a.re[t] + a.im[t] * a.im[t];
+      if (u >= 0 && u < b.re.length) p[t] += b.re[u] * b.re[u] + b.im[u] * b.im[u];
+    }
+    // Moving average, then a robust noise floor from the quietest samples.
+    const w = Math.max(4, Math.round(smoothUs * 1e-6 * fs)),
+      sm = new Float64Array(n);
+    let acc = 0;
+    for (let t = 0; t < n; t++) {
+      acc += p[t] - (t >= w ? p[t - w] : 0);
+      sm[t] = acc / Math.min(t + 1, w);
+    }
+    const sorted = Float64Array.from(sm).sort(),
+      floor = sorted[Math.floor(0.1 * n)] || 1e-30,
+      threshold = floor * 10 ** (thresholdDb / 10);
+    const runs = [];
+    for (let t = 0; t < n; ) {
+      if (sm[t] <= threshold) {
+        t++;
+        continue;
+      }
+      let e = t;
+      while (e < n && sm[e] > threshold) e++;
+      // The moving average lags by w samples; centre the run on the burst.
+      runs.push([Math.max(0, t - (w >> 1)), Math.min(n, e - (w >> 1))]);
+      t = e;
+    }
+    const merged = [],
+      gap = Math.round(mergeUs * 1e-6 * fs);
+    for (const r of runs) {
+      const last = merged[merged.length - 1];
+      if (last && r[0] - last[1] <= gap) last[1] = r[1];
+      else merged.push(r.slice());
+    }
+    // Drop short runs and keep a margin from the edges, where the power ramps.
+    const min = Math.round(minUs * 1e-6 * fs),
+      margin = Math.round(0.25e-6 * fs) + (w >> 1);
+    return merged
+      .filter(([s0, e0]) => e0 - s0 - 2 * margin >= min)
+      .map(([s0, e0]) => {
+        const start = s0 + margin,
+          end = e0 - margin;
+        let power = 0;
+        for (let t = start; t < end; t++) power += p[t];
+        return {
+          start,
+          end,
+          startUs: (start / fs) * 1e6,
+          endUs: (end / fs) * 1e6,
+          snrDb: 10 * Math.log10(power / (end - start) / floor),
+        };
+      });
+  }
+
+  // x delayed by d samples (fractional), via the FFT; returns x(t - d).
+  function fracDelay(x, d) {
+    const n = x.re.length,
+      N = nextPow2(n),
+      re = new Float64Array(N),
+      im = new Float64Array(N);
+    re.set(x.re);
+    im.set(x.im);
+    fft(re, im);
+    for (let i = 0; i < N; i++) {
+      const ph = (-TAU * (i < N / 2 ? i : i - N) * d) / N,
+        c = Math.cos(ph),
+        s = Math.sin(ph),
+        r = re[i] * c - im[i] * s;
+      im[i] = re[i] * s + im[i] * c;
+      re[i] = r;
+    }
+    fft(re, im, true);
+    const out = { re: new Float64Array(n), im: new Float64Array(n) };
+    for (let j = 0; j < n; j++) {
+      out.re[j] = re[j] / N;
+      out.im[j] = im[j] / N;
+    }
+    return out;
+  }
+
+  // Residual LO offset from the phase drift of A·B* inside each burst. The
+  // estimate over the whole snapshot cannot tell a frequency from a phase
+  // jump between two short bursts, which is exactly what is measured here.
+  function burstCfo(a, b, lag, bursts, fs) {
+    const k = Math.round(lag);
+    const drift = (burst, d) => {
+      let re = 0,
+        im = 0;
+      for (let t = burst.start; t + d < burst.end; t++) {
+        const u = t - k;
+        if (u < 0 || u + d >= b.re.length) continue;
+        // z[t] = a[t] * conj(b[t-k]); accumulate z[t+d] * conj(z[t])
+        const z0r = a.re[t] * b.re[u] + a.im[t] * b.im[u],
+          z0i = a.im[t] * b.re[u] - a.re[t] * b.im[u],
+          z1r = a.re[t + d] * b.re[u + d] + a.im[t + d] * b.im[u + d],
+          z1i = a.im[t + d] * b.re[u + d] - a.re[t + d] * b.im[u + d];
+        re += z1r * z0r + z1i * z0i;
+        im += z1i * z0r - z1r * z0i;
+      }
+      return { re, im };
+    };
+    // A short lag first (unambiguous over +-fs/128), then half the burst.
+    let hz = 0;
+    for (const d of [64, null]) {
+      let re = 0,
+        im = 0;
+      for (const burst of bursts) {
+        const dd = d ?? Math.max(64, (burst.end - burst.start) >> 1),
+          r = drift(burst, dd),
+          step = (TAU * hz * dd) / fs,
+          c = Math.cos(-step),
+          s = Math.sin(-step),
+          // remove the part already estimated, then weight by magnitude
+          rr = r.re * c - r.im * s,
+          ri = r.re * s + r.im * c,
+          ph = Math.atan2(ri, rr) / dd,
+          m = Math.hypot(rr, ri);
+        re += m * Math.cos(ph * 64);
+        im += m * Math.sin(ph * 64);
+      }
+      if (!re && !im) break;
+      hz += (Math.atan2(im, re) / 64 / TAU) * fs;
+    }
+    return hz;
+  }
+
+  // Phase of A·B* over one burst (b CFO-corrected, aligned by the lag; the
+  // fractional part of the lag is removed in the frequency domain, as in
+  // crossSpectrum()). For two bursts on the same channel, a residual time
+  // offset changes both phases alike, so their difference does not depend on it.
+  function burstPhase(a, b, lag, burst) {
+    const k = Math.round(lag),
+      frac = lag - k,
+      from = Math.max(burst.start, k),
+      to = Math.min(burst.end, b.re.length + k),
+      len = Math.max(0, to - from),
+      N = nextPow2(2 * len),
+      xr = new Float64Array(N),
+      xi = new Float64Array(N),
+      yr = new Float64Array(N),
+      yi = new Float64Array(N);
+    if (!len) return { phase: NaN, coherence: 0, powerA: 0, powerB: 0 };
+    for (let j = 0; j < len; j++) {
+      xr[j] = a.re[from + j];
+      xi[j] = a.im[from + j];
+      yr[j] = b.re[from - k + j];
+      yi[j] = b.im[from - k + j];
+    }
+    fft(xr, xi);
+    fft(yr, yi);
+    let re = 0,
+      im = 0,
+      pa = 0,
+      pb = 0;
+    for (let i = 0; i < N; i++) {
+      const ph = (TAU * (i < N / 2 ? i : i - N) * frac) / N,
+        c = Math.cos(ph),
+        s = Math.sin(ph),
+        cr = xr[i] * yr[i] + xi[i] * yi[i],
+        ci = xi[i] * yr[i] - xr[i] * yi[i];
+      re += cr * c - ci * s;
+      im += cr * s + ci * c;
+      pa += xr[i] * xr[i] + xi[i] * xi[i];
+      pb += yr[i] * yr[i] + yi[i] * yi[i];
+    }
+    return { phase: Math.atan2(im, re), coherence: pa && pb ? (re * re + im * im) / (pa * pb) : 0, powerA: pa, powerB: pb };
+  }
+
+  // RF frequency of the target signal, for the angle.
+  function targetFrequency(opt) {
+    return (opt.rfHz ?? 0) + (opt.mode === 'bursts' ? 0 : (opt.targetHz ?? 0));
+  }
+
   // Complete analysis of one snapshot pair.
   function analyze(iqA, iqB, fs, opt = {}) {
     const a = fromInterleaved(iqA),
@@ -471,7 +655,7 @@
     const coarse = coarseLag(a, b0, opt.maxLagSearch ?? 2048);
     const cfo = estimateCfo(a, b0, fs, opt.maxCfoHz ?? 100e3, opt.cfoLagSearch ?? 32, coarse.lag);
     cfo.coarse = coarse;
-    const b = rotate(b0, cfo.hz, fs);
+    let b = rotate(b0, cfo.hz, fs);
     const xc = crossCorrelate(a, b, opt.maxLag ?? Infinity);
     // Re-align the data with each refined delay until it settles.
     let cs = crossSpectrum(a, b, xc.lag, fs, opt.nfft ?? 1024);
@@ -481,11 +665,43 @@
       cs = next;
       if (done) break;
     }
-    const ref = bandPhase(cs, opt.refHz ?? 0, opt.refWidthHz ?? fs);
-    const target = bandPhase(cs, opt.targetHz ?? 0, opt.targetWidthHz ?? fs);
+    let ref, target, bursts = null;
+    if (opt.mode === 'bursts') {
+      // Reference and target are transmissions at different times.
+      bursts = findBursts(a, b, cs.lag, fs, { thresholdDb: opt.burstThresholdDb ?? 10 });
+      // Align B to the sample first: a fractional offset makes the phase of
+      // A·B* fluctuate with the signal, which disturbs the drift estimate.
+      // The LO offset and the time offset are refined alternately.
+      const refine = () => {
+        for (let j = 0; j < 6; j++) {
+          const next = crossSpectrum(a, b, cs.lag, fs, opt.nfft ?? 1024),
+            done = Math.abs(next.lag - cs.lag) < 0.005;
+          cs = next;
+          if (done) break;
+        }
+      };
+      cfo.burstResidualHz = 0;
+      for (let it = 0; it < 4 && bursts.length; it++) {
+        const k0 = Math.round(cs.lag),
+          residual = burstCfo(a, fracDelay(b, cs.lag - k0), k0, bursts, fs);
+        cfo.hz += residual;
+        cfo.burstResidualHz += residual;
+        b = rotate(b, residual, fs);
+        refine();
+        if (Math.abs(residual) < 2) break;
+      }
+      const k = Math.round(cs.lag),
+        bAligned = fracDelay(b, cs.lag - k);
+      const pick = (i) => (bursts[i] ? burstPhase(a, bAligned, k, bursts[i]) : { phase: NaN, coherence: 0 });
+      ref = pick((opt.refBurst ?? 1) - 1);
+      target = pick((opt.targetBurst ?? 2) - 1);
+    } else {
+      ref = bandPhase(cs, opt.refHz ?? 0, opt.refWidthHz ?? fs);
+      target = bandPhase(cs, opt.targetHz ?? 0, opt.targetWidthHz ?? fs);
+    }
     const dphi = wrap(target.phase - ref.phase - (opt.calibration ?? 0));
-    const angle = opt.baselineM ? angleFromPhase(dphi, opt.rfHz + (opt.targetHz ?? 0), opt.baselineM) : NaN;
-    return { cfo, xc, cs, ref, target, dphi, angle, a, b };
+    const angle = opt.baselineM ? angleFromPhase(dphi, targetFrequency(opt), opt.baselineM) : NaN;
+    return { cfo, xc, cs, ref, target, bursts, dphi, angle, a, b };
   }
 
   // Envelope |x|^2 reduced to `points` maxima for display.
@@ -515,6 +731,9 @@
     crossCorrelate,
     crossSpectrum,
     bandPhase,
+    findBursts,
+    burstPhase,
+    targetFrequency,
     angleFromPhase,
     circularMean,
     analyze,

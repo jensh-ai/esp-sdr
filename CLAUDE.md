@@ -67,6 +67,18 @@ Poll-Schleife). Seitdem `IRAM_ATTR` auf `acquire_iq_triggered`: gemessen
 nur noch −1 bis −4 Samples (Korrelation 0,82–0,996). Exportierte Paare ohne Sendung im 205-µs-Fenster
 enthalten nur Rauschen (RMS ~3–4 LSB bei Gain 40) und gehen nicht in die Mittelung.
 
+## Firmware-Erweiterung: `REFTX` (optionaler Referenzsender, nur C3)
+
+`REFTX <pin> <delay_us> <channel> <mbps> <power/0.25dBm> <N|P> <mac>` → treibt
+die Triggerleitung (A und B beide `TCAP … S`), sendet einen 802.11-Frame per
+`esp_wifi_80211_tx` (Null-Data oder Probe Request; vorher Wi-Fi NULL → STA,
+Rate nur bei gestopptem Wi-Fi setzbar), Antwort `REFTX <acked> <queued_us>
+<done_us>` aus dem TX-Done-Callback. Unicast an eine fremde MAC → deren ACK
+10 µs später = Zielsignal im selben Snapshot. Delay ist vom Nutzer per GUI
+einzustellen (Default 0), MAC-Wartezeit (CSMA) variiert. **Auf Hardware
+ungetestet**: ob der PHY nach der RX-Konfiguration (pbus) über esp_wifi_stop/
+start wieder sendet, ist offen.
+
 Schmale Spitzen im Spektrum auf einem 2-MHz-Raster (z. B. 2440/2444/2448 MHz)
 liegen in A und B bei identischem Offset trotz LO-Versatz → empfängerinterne
 Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
@@ -94,11 +106,18 @@ Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
      aus der Phasensteigung benachbarter Bins, nur in kohärenten Bereichen
      (γ ≥ 0,5, ≥ 8 Bins, effektive Bandbreite ≥ 4 Bins); schmalbandige Spitzen
      (> 10 dB über Bins 3–6 links/rechts) werden ausmaskiert. Iteriert, bis stabil.
-  5. Bandphasen Referenz/Ziel, Δφ = φ_Ziel − φ_Ref − Kalibrierung,
+  5. Modus „Bänder“: Bandphasen Referenz/Ziel. Modus „Bursts“ (Referenzsender):
+     Bursts aus Hüllkurve (Schwelle dB über 10-%-Perzentil), Rest-CFO aus der
+     Phasendrift *innerhalb* der Bursts (sonst wird der Phasensprung zwischen
+     kurzen Bursts als Frequenz fehlinterpretiert), B fraktional ausgerichtet,
+     Phase je Burst. Gleicher Kanal ⇒ Zeitversatzfehler kürzt sich.
+     Δφ = φ_Ziel − φ_Ref − Kalibrierung,
      Winkel = asin(Δφ·c / (2π·f·d)).
   Grundsatz: **CW-Töne enthalten keine Zeitversatz-Information.** Mindestens ein
   breitbandiges Signal (WLAN/BLE) muss in beiden Snapshots sein, sonst Warnung.
   Genauigkeit in Simulation: Lag ≈ 0,1 Sample, Δφ < 0,06 rad.
+  CFO-Lag-Suche bewertet die absolute Spitzenleistung (Spitze/Mittel versagt
+  bei kurzen Bursts).
 - Export/Import eines Paars als JSON (Python-Snippet in `webapp/README.md`).
 - Hosting: `.github/workflows/pages.yml` veröffentlicht `webapp/` aus `main`
   (Settings → Pages → Source: GitHub Actions, vom Nutzer noch zu aktivieren).

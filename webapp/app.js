@@ -6,6 +6,11 @@
   const DEG = 180 / Math.PI;
   const names = ['A', 'B'];
   const devices = Object.fromEntries(names.map((n) => [n, { name: n, radio: new BurstSerialRadio(), info: null }]));
+  // Optional third board: drives the trigger line and sends the reference frame.
+  const refDevice = { name: 'R', radio: new BurstSerialRadio(), info: null };
+  const roles = [...names, 'R'];
+  const deviceOf = (n) => (n === 'R' ? refDevice : devices[n]);
+  const roleLabel = (n) => (n === 'R' ? 'Reference transmitter' : `Receiver ${n}`);
 
   let running = false,
     busy = false,
@@ -32,14 +37,18 @@
     $('calibrate').disabled = !history.length;
     $('export').disabled = !lastPair;
     $('swap').disabled = busy || running || !names.some((n) => devices[n].radio.port);
-    for (const n of names) {
-      const on = !!devices[n].radio.port;
+    for (const n of roles) {
+      const on = !!deviceOf(n).radio.port;
       $('connect-' + n).disabled = on || running;
       $('choose-' + n).disabled = on || running;
       $('iface-' + n).disabled = on || running;
       $('disconnect-' + n).disabled = !on || running;
       $('device-' + n).classList.toggle('connected', on);
     }
+    const refOn = !!refDevice.radio.port;
+    for (const id of ['ref-channel', 'ref-mac', 'ref-delay', 'ref-frame', 'ref-rate', 'ref-power'])
+      $(id).disabled = running;
+    $('device-R').classList.toggle('connected', refOn);
   }
 
   function captureSettings() {
@@ -54,6 +63,21 @@
       triggerPin: Math.round(num('trigger-pin')),
       triggerTimeout: Math.round(num('trigger-timeout')),
     };
+    if (c.trigger === 'reftx') {
+      const mac = $('ref-mac').value.trim().replace(/-/g, ':').toUpperCase();
+      if (mac && !/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(mac)) throw Error('Target MAC: use the form aa:bb:cc:dd:ee:ff.');
+      c.reference = {
+        channel: Math.round(num('ref-channel')),
+        mac: mac || 'FF:FF:FF:FF:FF:FF',
+        delayUs: Math.round(num('ref-delay')),
+        frame: $('ref-frame').value,
+        rateMbps: Number($('ref-rate').value),
+        powerDbm: Math.round(num('ref-power')),
+      };
+      if (!(c.reference.channel >= 1 && c.reference.channel <= 13)) throw Error('Wi-Fi channel: 1 to 13.');
+      if (!(Math.abs(c.reference.delayUs) <= 5000)) throw Error('TX delay: -5000 to 5000 µs.');
+      if (!(c.reference.powerDbm >= 2 && c.reference.powerDbm <= 20)) throw Error('TX power: 2 to 20 dBm.');
+    }
     if (!Number.isInteger(c.frequency)) throw Error('Use a whole-MHz center frequency.');
     if (!(c.samples >= 512)) throw Error('Use at least 512 samples.');
     return c;
@@ -67,6 +91,10 @@
       baselineM: num('baseline') / 100,
       maxCfoHz: num('max-cfo') * 1e3,
       nfft: num('nfft'),
+      mode: $('analysis-mode').value,
+      burstThresholdDb: num('burst-threshold'),
+      refBurst: Math.max(1, Math.round(num('ref-burst'))),
+      targetBurst: Math.max(1, Math.round(num('target-burst'))),
       rfHz: rfMHz * 1e6,
       calibration,
     };
@@ -96,17 +124,22 @@
     $('gain').max = Math.min(...radios.map((r) => r.gainMax));
     const agc = radios.every((r) => r.hasHardwareAgc);
     $('gain-mode').options[1].disabled = !agc;
-    // Offer the GPIO trigger only when every connected receiver supports it.
-    const tcap = radios.every((r) => r.hasTriggeredCapture);
-    $('trigger-mode').options[0].disabled = !tcap;
-    $('trigger-mode').value = tcap ? 'gpio' : 'software';
+    // Offer the GPIO triggers only when every connected receiver supports them.
+    const tcap = radios.every((r) => r.hasTriggeredCapture),
+      reftx = tcap && !!refDevice.radio.port && refDevice.radio.hasRefTx,
+      sel = $('trigger-mode');
+    sel.querySelector('[value=gpio]').disabled = !tcap;
+    sel.querySelector('[value=reftx]').disabled = !reftx;
+    if (sel.selectedOptions[0]?.disabled || (sel.value === 'software' && tcap)) sel.value = tcap ? 'gpio' : 'software';
   }
 
-  // radio.js does not keep the capability list, so ask for TCAP separately.
+  // radio.js does not keep the capability list, so ask for TCAP/REFTX separately.
   async function probeTrigger(r) {
     await r.run(async () => {
       await r.command('CAPS');
-      r.hasTriggeredCapture = (await r.line('CAPS')).split(' ').includes('TCAP');
+      const caps = (await r.line('CAPS')).split(' ');
+      r.hasTriggeredCapture = caps.includes('TCAP');
+      r.hasRefTx = caps.includes('REFTX');
     });
   }
 
@@ -135,7 +168,7 @@
     const saved = load(n);
     if (saved.kind !== kind) return null;
     const ports = await SerialConnection.getPorts(kind),
-      others = names.filter((m) => m !== n).map((m) => devices[m].radio.port);
+      others = roles.filter((m) => m !== n).map((m) => deviceOf(m).radio.port);
     const free = ports.filter((p) => !others.includes(p));
     if (kind === 'webusb') return saved.serial ? free.find((p) => portSerial(p) === saved.serial) || null : null;
     const p = ports[saved.index];
@@ -149,29 +182,29 @@
   }
 
   async function connect(n, choose = false) {
-    const dev = devices[n];
+    const dev = deviceOf(n);
     const kind = $('iface-' + n).value;
     try {
-      message(`Connecting receiver ${n}…`);
-      const other = devices[n === 'A' ? 'B' : 'A'].radio.port;
+      message(`Connecting ${roleLabel(n).toLowerCase()}…`);
+      const others = roles.filter((m) => m !== n).map((m) => deviceOf(m).radio.port);
       let port = choose ? null : await rememberedPort(n, kind);
       if (!port) port = await SerialConnection.requestPort(kind);
-      if (other && port === other) throw Error('This port is already used by the other receiver.');
+      if (others.includes(port)) throw Error('This port is already used by another board.');
       await dev.radio.connect({ port });
       await probeTrigger(dev.radio);
       await remember(n, port);
       showStatus(n);
       applyCapabilities();
-      message(`Receiver ${n} connected.`);
+      message(`${roleLabel(n)} connected.`);
     } catch (e) {
       if (e?.name === 'NotFoundError') message('No port selected.');
-      else message(`Receiver ${n}: ${e.message || e}`, true);
+      else message(`${roleLabel(n)}: ${e.message || e}`, true);
     }
     updateButtons();
   }
 
   function showStatus(n) {
-    const dev = devices[n],
+    const dev = deviceOf(n),
       port = dev.radio.port;
     if (!port) {
       $('status-' + n).textContent = 'Not connected';
@@ -179,8 +212,15 @@
     }
     const serial = portSerial(port),
       via = SerialConnection.kind(port) === 'webusb' ? 'WebUSB' + (serial ? ' ' + serial : '') : 'Web Serial';
-    $('status-' + n).textContent =
-      `${describe(dev)} · ${dev.radio.hasTriggeredCapture ? 'GPIO trigger' : 'no GPIO trigger'} · ${via}`;
+    const features =
+      n === 'R'
+        ? dev.radio.hasRefTx
+          ? 'reference transmitter (REFTX)'
+          : 'no REFTX: update the firmware'
+        : dev.radio.hasTriggeredCapture
+          ? 'GPIO trigger'
+          : 'no GPIO trigger';
+    $('status-' + n).textContent = `${describe(dev)} · ${features} · ${via}`;
   }
 
   function bindErrors() {
@@ -210,7 +250,7 @@
 
   function initInterfaces() {
     const available = { webserial: !!navigator.serial, webusb: !!navigator.usb };
-    for (const n of names) {
+    for (const n of roles) {
       const sel = $('iface-' + n);
       for (const opt of sel.options) opt.disabled = !available[opt.value];
       const saved = load(n).kind;
@@ -220,13 +260,14 @@
   }
 
   async function disconnect(n) {
-    const dev = devices[n];
+    const dev = deviceOf(n);
     try {
       await dev.radio.run(() => dev.radio.close());
     } catch (e) {
       message(e.message || String(e), true);
     }
     showStatus(n);
+    applyCapabilities();
     updateButtons();
   }
 
@@ -249,21 +290,43 @@
       ),
     );
     const t0 = performance.now();
-    let packets;
+    let packets,
+      reference = null;
     if (c.trigger === 'gpio') {
       if (!radios.every((r) => r.hasTriggeredCapture)) throw Error('Both receivers need firmware with GPIO trigger.');
       // Phase 2 (GPIO): arm B, and only when B reports ARMED let A raise the line.
       let armedB;
       const bArmed = new Promise((resolve, reject) => (armedB = { resolve, reject }));
       const [b, a] = radios.slice().reverse();
-      const slave = b.run(() => triggeredPacket(b, c, divider, 'S', armedB));
+      const slave = b.run(() => triggeredPacket(b, c, divider, 'S', armedB, 'B'));
       const master = a.run(async () => {
         await bArmed;
-        return triggeredPacket(a, c, divider, 'M', null);
+        return triggeredPacket(a, c, divider, 'M', null, 'A');
       });
       // If arming B fails, release A's wait before reporting the error.
       slave.catch((e) => armedB.reject(e));
       packets = await Promise.all([master, slave]);
+      for (const p of packets) p.hostMs = performance.now() - t0;
+    } else if (c.trigger === 'reftx') {
+      const t = refDevice.radio;
+      if (!radios.every((r) => r.hasTriggeredCapture)) throw Error('Both receivers need firmware with GPIO trigger.');
+      if (!t.port || !t.hasRefTx) throw Error('Connect a reference transmitter with REFTX firmware.');
+      // Phase 2 (reference transmitter): arm A and B as listeners; when both
+      // report ARMED, the transmitter raises the line and sends its frame.
+      const armed = radios.map(() => {
+        let d;
+        const p = new Promise((resolve, reject) => (d = { resolve, reject }));
+        return { p, d };
+      });
+      const listeners = radios.map((r, i) => r.run(() => triggeredPacket(r, c, divider, 'S', armed[i].d, names[i])));
+      listeners.forEach((l, i) => l.catch((e) => armed[i].d.reject(e)));
+      const tx = t.run(async () => {
+        await Promise.all(armed.map((x) => x.p));
+        return referenceTransmit(t, c);
+      });
+      const results = await Promise.all([...listeners, tx]);
+      packets = results.slice(0, 2);
+      reference = results[2];
       for (const p of packets) p.hostMs = performance.now() - t0;
     } else packets = await Promise.all(
       radios.map((r) =>
@@ -280,6 +343,7 @@
       settings: c,
       gains,
       trigger: packets.map((p) => p.trigger ?? null),
+      reference,
       devices: names.map((n, i) => ({
         name: n,
         identity: radios[i].identity,
@@ -294,7 +358,7 @@
 
   // One TCAP transaction: ARMED, then TRIG <late> <wait_us>, DATA header and
   // payload (the same framing and CRC as CAP16/CAP20).
-  async function triggeredPacket(r, c, divider, role, armed) {
+  async function triggeredPacket(r, c, divider, role, armed, name) {
     const n = Math.min(c.samples, r.maxSamples);
     try {
       await r.command(`TCAP${c.bits * 2} ${n} ${divider} ${c.triggerPin} ${role} ${c.triggerTimeout}`);
@@ -310,15 +374,38 @@
       if (crc32(bytes) !== parseInt(h[2], 16)) throw Object.assign(Error('Capture CRC mismatch'), { code: 'CAPTURE_DAMAGED' });
       return { bytes, n, captureUs: Number(h[3]), retries: 0, trigger: { late: m[1] === '1', waitUs: Number(m[2]) } };
     } catch (e) {
-      const label = role === 'M' ? 'A (trigger master)' : 'B (trigger listener)';
+      const label = `${name} (trigger ${role === 'M' ? 'master' : 'listener'})`;
       const hint = /trigger_timeout/.test(e.message)
-        ? ' Check the trigger wire between the two boards, the pin number and the common GND.'
+        ? ' Check the trigger wire between the boards, the pin number and the common GND.'
         : /trigger_busy/.test(e.message)
           ? ' The trigger line is high before arming: check the wiring.'
           : '';
       // Restore the framing for the next command after a damaged transfer.
       if (!r.failed) await r.synchronize().catch(() => {});
       throw Error(`Receiver ${label}: ${e.message}.${hint}`);
+    }
+  }
+
+  // REFTX <pin> <delay_us> <channel> <mbps> <power> <N|P> <mac>
+  //   -> REFTX <acked> <queued_us> <done_us>
+  async function referenceTransmit(r, c) {
+    const x = c.reference;
+    try {
+      await r.command(
+        `REFTX ${c.triggerPin} ${x.delayUs} ${x.channel} ${x.rateMbps} ${x.powerDbm * 4} ${x.frame} ${x.mac}`,
+      );
+      const reply = await r.line(),
+        m = /^REFTX ([01]) (-?\d+) (-?\d+)$/.exec(reply);
+      if (!m) throw Error(reply);
+      return {
+        broadcast: x.mac === 'FF:FF:FF:FF:FF:FF',
+        acked: m[1] === '1',
+        queuedUs: Number(m[2]),
+        doneUs: Number(m[3]),
+      };
+    } catch (e) {
+      if (!r.failed) await r.synchronize().catch(() => {});
+      throw Error(`Reference transmitter: ${e.message}`);
     }
   }
 
@@ -332,7 +419,10 @@
     return r;
   }
   function isUsable(r) {
-    return r.cs.delayRuns > 0 && r.ref.coherence >= 0.5 && r.target.coherence >= 0.5;
+    // Bursts on one channel need no delay measurement: a residual time offset
+    // shifts both phases alike.
+    const timing = r.bursts ? true : r.cs.delayRuns > 0;
+    return timing && r.ref.coherence >= 0.5 && r.target.coherence >= 0.5;
   }
   // RMS level in LSB of the sample format, for the "only noise" hint.
   function levelLsb(iq, bits) {
@@ -407,7 +497,7 @@
       s = lastPair.settings,
       opt = analysisSettings(s.frequency),
       st = stats(),
-      angle = DualDSP.angleFromPhase(st.mean, opt.rfHz + opt.targetHz, opt.baselineM);
+      angle = DualDSP.angleFromPhase(st.mean, DualDSP.targetFrequency(opt), opt.baselineM);
     $('m-angle').textContent = fmt(angle, 1, '°');
     $('m-dphi').textContent = fmt(st.mean * DEG, 1, '°');
     $('m-spread').textContent = st.count > 1 ? fmt(st.std * DEG, 1, '°') : '–';
@@ -419,11 +509,22 @@
     $('m-cal').textContent = fmt(calibration * DEG, 1, '°');
     const trig = lastPair.trigger ?? [];
     $('m-trigger').textContent =
-      s.trigger === 'gpio' && trig.every(Boolean)
+      (s.trigger === 'gpio' || s.trigger === 'reftx') && trig.every(Boolean)
         ? trig.some((t) => t.late)
           ? 'GPIO, late edge'
-          : `GPIO (${fmt(trig[1].waitUs / 1e3, 1, ' ms')} wait)`
+          : `${s.trigger === 'reftx' ? 'Ref. TX' : 'GPIO'} (${fmt(trig[1].waitUs / 1e3, 1, ' ms')} wait)`
         : 'software';
+    const x = lastPair.reference;
+    $('m-ref').textContent = x
+      ? `${x.broadcast ? 'broadcast' : x.acked ? 'ACK received' : 'no ACK'} · queued ${x.queuedUs} µs, done ${
+          x.doneUs >= 0 ? x.doneUs + ' µs' : '–'
+        }`
+      : '–';
+    $('m-bursts').textContent = r.bursts
+      ? r.bursts.length
+        ? r.bursts.map((b) => `${b.startUs.toFixed(0)}–${b.endUs.toFixed(0)} µs`).join(', ')
+        : 'none'
+      : '–';
     $('m-count').textContent = skipped ? `${history.length} (+${skipped} skipped)` : String(history.length);
 
     const warn = [];
@@ -433,7 +534,15 @@
       warn.push(
         `Both snapshots contain only noise (RMS ${r.level.map((l) => l.toFixed(1)).join(' / ')} LSB): no transmission during the ${Math.round((s.samples / s.rate) * 1e6)} µs snapshot. Keep capturing (Start) or raise the gain.`,
       );
-    if (r.cs.delayRuns === 0)
+    if (r.bursts) {
+      const need = Math.max(opt.refBurst, opt.targetBurst);
+      if (r.bursts.length < need)
+        warn.push(
+          `Only ${r.bursts.length} burst(s) found, burst #${need} is needed.` +
+            (x && !x.broadcast && !x.acked ? ' The target did not acknowledge: check its MAC and the Wi-Fi channel.' : '') +
+            (x ? ' Adjust the TX delay so that the frame and its ACK fall into the snapshot.' : ''),
+        );
+    } else if (r.cs.delayRuns === 0)
       warn.push(
         'No wideband coherent signal: the sampling time offset cannot be measured, so the phase difference between bands at different frequencies is unreliable.',
       );
@@ -445,8 +554,9 @@
       );
     if ((lastPair.trigger ?? []).some((t) => t?.late))
       warn.push('A trigger edge arrived while the receiver had interrupts enabled; its start time is less precise.');
-    if (r.ref.coherence < 0.5) warn.push('Reference band is not coherent between the receivers.');
-    if (r.target.coherence < 0.5) warn.push('Target band is not coherent between the receivers.');
+    const what = r.bursts ? 'burst' : 'band';
+    if (r.ref.coherence < 0.5) warn.push(`Reference ${what} is not coherent between the receivers.`);
+    if (r.target.coherence < 0.5) warn.push(`Target ${what} is not coherent between the receivers.`);
     if (r.clipped.some((c) => c > 0.001)) warn.push('Clipping detected: lower the gain.');
     if (Math.abs(r.cfo.hz) > opt.maxCfoHz * 0.95) warn.push('LO offset at the search limit: increase “Max. LO offset”.');
     if (Number.isNaN(angle) && st.count)
@@ -454,7 +564,7 @@
     $('warnings').textContent = warn.join(' ');
 
     drawSpectrum(r, opt);
-    drawEnvelope(r, s);
+    drawEnvelope(r, s, opt);
     drawCorrelation(r);
     drawPhase(r, opt);
     drawHistory(opt);
@@ -577,6 +687,18 @@
 
   const db = (p) => 10 * Math.log10(p + 1e-20);
 
+  function bandOverlays(opt) {
+    if (opt.mode === 'bursts') return [];
+    return [
+        { from: (opt.refHz - opt.refWidthHz / 2) / 1e6, to: (opt.refHz + opt.refWidthHz / 2) / 1e6, color: css('--band-ref') },
+        {
+          from: (opt.targetHz - opt.targetWidthHz / 2) / 1e6,
+          to: (opt.targetHz + opt.targetWidthHz / 2) / 1e6,
+          color: css('--band-target'),
+        },
+      ];
+  }
+
   function drawSpectrum(r, opt) {
     const f = Array.from(r.cs.freq, (x) => x / 1e6),
       norm = r.cs.segments * r.cs.nfft || 1;
@@ -585,20 +707,19 @@
         { x: f, y: Array.from(r.cs.paa, (p) => db(p / norm)), color: css('--series-a') },
         { x: f, y: Array.from(r.cs.pbb, (p) => db(p / norm)), color: css('--series-b') },
       ],
-      bands: [
-        { from: (opt.refHz - opt.refWidthHz / 2) / 1e6, to: (opt.refHz + opt.refWidthHz / 2) / 1e6, color: css('--band-ref') },
-        {
-          from: (opt.targetHz - opt.targetWidthHz / 2) / 1e6,
-          to: (opt.targetHz + opt.targetWidthHz / 2) / 1e6,
-          color: css('--band-target'),
-        },
-      ],
+      bands: bandOverlays(opt),
       xLabel: 'Offset from center (MHz)',
       yLabel: 'dB',
     });
   }
 
-  function drawEnvelope(r, s) {
+  function drawEnvelope(r, s, opt) {
+    const bursts = (r.bursts ?? []).map((b, i) => ({
+      from: b.startUs,
+      to: b.endUs,
+      color:
+        i === opt.refBurst - 1 ? css('--band-ref') : i === opt.targetBurst - 1 ? css('--band-target') : css('--grid'),
+    }));
     const ea = DualDSP.envelope(r.a),
       eb = DualDSP.envelope(r.b),
       tA = Array.from(ea, (_, i) => ((i * r.a.re.length) / ea.length / s.rate) * 1e6),
@@ -608,6 +729,7 @@
         { x: tA, y: Array.from(ea, db), color: css('--series-a'), width: 1 },
         { x: tB, y: Array.from(eb, db), color: css('--series-b'), width: 1 },
       ],
+      bands: bursts,
       xLabel: 'Time in snapshot (µs)',
       yLabel: 'dB',
     });
@@ -633,14 +755,7 @@
       alpha = Array.from(r.cs.coherence, (g) => (g >= 0.5 ? 1 : 0.12));
     plot($('plot-phase'), {
       series: [{ x: f, y: phase, color: css('--accent'), points: true, alpha }],
-      bands: [
-        { from: (opt.refHz - opt.refWidthHz / 2) / 1e6, to: (opt.refHz + opt.refWidthHz / 2) / 1e6, color: css('--band-ref') },
-        {
-          from: (opt.targetHz - opt.targetWidthHz / 2) / 1e6,
-          to: (opt.targetHz + opt.targetWidthHz / 2) / 1e6,
-          color: css('--band-target'),
-        },
-      ],
+      bands: bandOverlays(opt),
       xLabel: 'Offset from center (MHz)',
       yLabel: 'phase A·B* (°)',
       yRange: [-180, 180],
@@ -651,7 +766,7 @@
     const x = history.map((_, i) => i + 1),
       dphi = history.map((h) => DualDSP.wrap(h.dphi - calibration) * DEG),
       angle = history.map((h) =>
-        DualDSP.angleFromPhase(DualDSP.wrap(h.dphi - calibration), opt.rfHz + opt.targetHz, opt.baselineM),
+        DualDSP.angleFromPhase(DualDSP.wrap(h.dphi - calibration), DualDSP.targetFrequency(opt), opt.baselineM),
       );
     plot($('plot-history'), {
       series: [
@@ -713,7 +828,7 @@
   }
 
   // ---------- wiring ----------
-  for (const n of names) {
+  for (const n of roles) {
     $('connect-' + n).addEventListener('click', () => connect(n));
     $('choose-' + n).addEventListener('click', () => connect(n, true));
     $('disconnect-' + n).addEventListener('click', () => disconnect(n));
@@ -748,16 +863,45 @@
     e.target.value = '';
   });
   // Re-analyze the last pair when analysis settings change.
-  for (const id of ['ref-offset', 'ref-width', 'target-offset', 'target-width', 'baseline', 'max-cfo', 'nfft', 'average'])
+  for (const id of [
+    'ref-offset',
+    'ref-width',
+    'target-offset',
+    'target-width',
+    'baseline',
+    'max-cfo',
+    'nfft',
+    'average',
+    'analysis-mode',
+    'burst-threshold',
+    'ref-burst',
+    'target-burst',
+  ])
     $(id).addEventListener('change', () => {
       if (!lastPair) return;
+      const was = lastResult?.usable;
       lastResult = analyzePair(lastPair);
-      history[history.length - 1] = { dphi: lastResult.dphi + calibration, time: Date.now() };
+      lastResult.usable = isUsable(lastResult);
+      // Keep the history consistent with the re-analyzed last pair.
+      const entry = { dphi: lastResult.dphi + calibration, time: Date.now() };
+      if (was && lastResult.usable) history[history.length - 1] = entry;
+      else if (was) {
+        history.pop();
+        skipped++;
+      } else if (lastResult.usable) {
+        history.push(entry);
+        skipped = Math.max(0, skipped - 1);
+      }
       render();
+      updateButtons();
     });
   window.addEventListener('resize', render);
   bindErrors();
   initInterfaces();
+  // Frame and ACK share the channel: analyze them as bursts in time.
+  $('trigger-mode').addEventListener('change', () => {
+    if ($('trigger-mode').value === 'reftx') $('analysis-mode').value = 'bursts';
+  });
   $('swap').addEventListener('click', swap);
 
   if (!SerialConnection.supported())

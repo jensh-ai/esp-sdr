@@ -90,7 +90,31 @@ What this means in practice:
   cross-correlation. With a few centimetres between the antennas, the
   geometric delay difference is far below one sample, so both produce their
   peak at the same lag. Use different frequencies (bands) for the reference
-  and the target.
+  and the target, or separate them in time (below).
+
+### Bursts in time
+
+With *Reference / target from: Bursts in time*, the reference and the target
+are two transmissions at different times on the same channel, for example a
+frame from the reference transmitter and the ACK of the target 10 µs later.
+Steps 1 to 4 are the same; step 5 changes:
+
+1. **Find the bursts:** the summed power of A and the aligned B is smoothed
+   over 0.4 µs. Runs more than *Burst threshold* (default 10 dB) above the
+   noise floor (10th percentile) that last at least 2 µs are bursts; gaps
+   below 1 µs are merged, and 0.25 µs at each edge is dropped. They are
+   numbered in time and drawn in the *Envelope* plot.
+2. **Refine the LO offset inside the bursts:** over the whole snapshot, a
+   phase jump between two short bursts looks like a frequency offset (4 kHz
+   over 40 µs is already one radian). So the residual offset is taken from the
+   phase drift of A·B* within each burst, alternating with the time offset
+   until both settle.
+3. **Phase per burst:** B is aligned to a fraction of a sample, and A·B* is
+   summed over the burst. Δφ = φ(target burst) − φ(reference burst). Both
+   bursts share the channel, so a residual time offset changes both phases
+   alike and cancels; no wideband delay measurement is needed.
+
+*Reference burst #* and *Target burst #* select the bursts (default 1 and 2).
 
 ## Hosting
 
@@ -125,7 +149,7 @@ Then open <http://localhost:8000/>.
 the repository under *Settings → Pages → Build and deployment → Source:
 GitHub Actions*. The app is then at `https://<user>.github.io/<repo>/`.
 
-## Synchronizing the two receivers
+## Synchronizing the receivers
 
 With the default **GPIO trigger**, both snapshots start on a shared wire:
 
@@ -143,6 +167,36 @@ without a common wideband signal, for example when nothing transmitted during
 the 205 µs snapshot, are shown but left out of the average. That needs a wideband signal in both snapshots (a CW tone looks the same
 at every delay): the app warns when there is none, because the phase
 difference between bands at different frequencies is then unreliable.
+
+### Reference transmitter (optional)
+
+A third ESP32-C3 can drive the trigger line instead of receiver A and send a
+reference signal into every snapshot (`REFTX` in
+[docs/protocol.md](../docs/protocol.md)):
+
+1. Connect its trigger pin and GND to the same line as A and B. Both receivers
+   then only listen.
+2. Choose *Trigger: Reference transmitter*. The analysis switches to *Bursts
+   in time*.
+3. Per capture it sends one 802.11 frame on the chosen *Wi-Fi channel*. With
+   an empty *Target MAC*, the frame is a broadcast: a known reference, no
+   reply. With the MAC of a Wi-Fi device, that device answers with an ACK
+   10 µs after the frame: reference and target are then always in the same
+   snapshot, without flooding the channel (one short frame per capture).
+4. *TX delay after trigger* sets when the frame is handed to the Wi-Fi driver,
+   relative to the trigger edge; the driver adds a varying wait for a free
+   channel. Adjust it so that the frame and the ACK appear in the *Envelope*
+   plot inside the snapshot. *Reference TX* shows whether the ACK arrived and
+   the driver's timing.
+5. Keep the TX power low (2 dBm) and the transmitter some distance away, so
+   that the receivers do not clip.
+
+Only address your own devices.
+
+<img src="../docs/webapp-reference-tx.png" alt="Reference transmitter mode with emulated boards: frame at 35–65 µs (reference, green) and ACK at 75–105 µs (target, purple) in the envelope plot" width="640">
+
+*Emulated boards: B sees the reference frame with 0.6 rad (34.4°) more phase
+than the ACK; the app measures 34.6° with 2° spread over 33 captures.*
 
 **Software trigger** (two USB commands) remains available for firmware without
 `TCAP`; its start-time jitter of about a millisecond is longer than a whole

@@ -134,6 +134,13 @@ footer {
 .swatch.b {
   background: var(--series-b);
 }
+.swatch.r {
+  background: var(--muted);
+}
+h2 small {
+  font-weight: normal;
+  color: var(--muted);
+}
 .row,
 .actions {
   display: flex;

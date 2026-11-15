@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "heap_memory_layout.h"
 #include "nvs_flash.h"
@@ -272,6 +273,155 @@ static bool triggered_capture_command(const char *line) {
     return true;
 }
 
+/* REFTX <pin> <delay_us> <channel> <mbps> <power> <N|P> <mac>: optional
+ * reference transmitter. It drives the shared trigger line (both receivers
+ * listen with TCAP ... S) and sends one 802.11 frame at <delay_us> from the
+ * trigger edge (negative: the frame is queued first). The frame is the
+ * reference signal in both snapshots. Addressed to another station, it makes
+ * that station answer with an ACK one SIFS (10 us) after the frame, so a
+ * reference and a target transmission share every snapshot.
+ * <power> is in 0.25 dBm (8..84), <N|P> selects a null-data frame or a probe
+ * request, <mac> FF:FF:FF:FF:FF:FF sends a broadcast (no ACK).
+ * Replies REFTX <acked> <queued_us> <done_us>, times relative to the edge;
+ * acked is 1 when the station acknowledged (always 1 for broadcasts) and
+ * done_us is -1 when the driver reported nothing within 50 ms. */
+static SemaphoreHandle_t reftx_sem;
+static volatile int64_t reftx_done_at;
+static volatile bool reftx_acked;
+static int reftx_configured_rate = -1;
+
+static void reftx_done(const esp_80211_tx_info_t *info) {
+    reftx_done_at = esp_timer_get_time();
+    reftx_acked = info->tx_status == WIFI_SEND_SUCCESS;
+    xSemaphoreGive(reftx_sem);
+}
+
+static int reftx_rate(unsigned mbps) {
+    switch (mbps) {
+    case 1: return WIFI_PHY_RATE_1M_L;
+    case 2: return WIFI_PHY_RATE_2M_S;
+    case 5: return WIFI_PHY_RATE_5M_S;
+    case 11: return WIFI_PHY_RATE_11M_S;
+    case 6: return WIFI_PHY_RATE_6M;
+    case 9: return WIFI_PHY_RATE_9M;
+    case 12: return WIFI_PHY_RATE_12M;
+    case 18: return WIFI_PHY_RATE_18M;
+    case 24: return WIFI_PHY_RATE_24M;
+    case 36: return WIFI_PHY_RATE_36M;
+    case 48: return WIFI_PHY_RATE_48M;
+    case 54: return WIFI_PHY_RATE_54M;
+    default: return -1;
+    }
+}
+
+/* The receiver runs Wi-Fi in NULL mode with the PHY forced to receive. Raw
+ * frames need station mode, and the rate can only be set while Wi-Fi is
+ * stopped; restarting it also re-initializes the PHY for transmitting. */
+static bool reftx_setup(int rate) {
+    if (reftx_configured_rate == rate) return true;
+    if (!reftx_sem && !(reftx_sem = xSemaphoreCreateBinary())) return false;
+    reftx_configured_rate = -1;
+    (void)esp_wifi_stop();
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
+        esp_wifi_config_80211_tx_rate(WIFI_IF_STA, (wifi_phy_rate_t)rate) != ESP_OK || esp_wifi_start() != ESP_OK)
+        return false;
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+    if (esp_wifi_register_80211_tx_cb(reftx_done) != ESP_OK) return false;
+    reftx_configured_rate = rate;
+    return true;
+}
+
+static int reftx_frame(uint8_t *f, char type, const uint8_t *to) {
+    uint8_t own[6];
+    esp_wifi_get_mac(WIFI_IF_STA, own);
+    memset(f, 0, 24);
+    f[0] = type == 'P' ? 0x40 : 0x48; /* probe request : null data */
+    memcpy(f + 4, to, 6);
+    memcpy(f + 10, own, 6);
+    memcpy(f + 16, to, 6);
+    if (type != 'P') return 24;
+    static const uint8_t body[] = {0x00, 0x00, /* wildcard SSID */
+                                   0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24};
+    memcpy(f + 24, body, sizeof(body));
+    return 24 + (int)sizeof(body);
+}
+
+static bool reftx_command(const char *line) {
+    unsigned pin, channel, mbps, power, m[6];
+    int delay;
+    char type, extra;
+    if (strncmp(line, "REFTX ", 6)) return false;
+    if (sscanf(line, "REFTX %u %d %u %u %u %c %x:%x:%x:%x:%x:%x %c", &pin, &delay, &channel, &mbps, &power, &type,
+               &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &extra) != 12 ||
+        channel < 1 || channel > 13 || delay < -5000 || delay > 5000 || power < 8 || power > 84 ||
+        (type != 'N' && type != 'P') || (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) > 255) {
+        reply("ERR reftx_args\n");
+        return true;
+    }
+    int rate = reftx_rate(mbps);
+    if (rate < 0) {
+        reply("ERR rate\n");
+        return true;
+    }
+    if (!burst_gpio_trigger_pin(pin, true)) {
+        reply("ERR trigger_pin\n");
+        return true;
+    }
+    rx_ready = false; /* the next capture prepares the receiver again */
+    if (!reftx_setup(rate)) {
+        reply("ERR reftx_wifi\n");
+        return true;
+    }
+    rx_lo_select(false);
+    if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
+        esp_wifi_set_max_tx_power((int8_t)power) != ESP_OK) {
+        reply("ERR reftx_wifi\n");
+        return true;
+    }
+    uint8_t to[6], frame[40];
+    for (unsigned j = 0; j < 6; j++) to[j] = (uint8_t)m[j];
+    int len = reftx_frame(frame, type, to);
+    (void)xSemaphoreTake(reftx_sem, 0);
+    reftx_done_at = 0;
+    const uint32_t mask = 1u << pin;
+    int64_t edge, queued;
+    esp_err_t err;
+    if (delay >= 0) {
+        edge = esp_timer_get_time();
+        REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+        esp_rom_delay_us((uint32_t)delay);
+        queued = esp_timer_get_time();
+        err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
+    } else {
+        /* The Wi-Fi task has the higher priority and hands the frame to the
+         * MAC while this task waits. */
+        queued = esp_timer_get_time();
+        err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
+        esp_rom_delay_us((uint32_t)-delay);
+        edge = esp_timer_get_time();
+        REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+    }
+    bool done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
+    /* Hold the line until both receivers have certainly seen it. */
+    int64_t hold = edge + 2000 - esp_timer_get_time();
+    if (hold > 0) esp_rom_delay_us((uint32_t)hold);
+    REG_WRITE(GPIO_OUT_W1TC_REG, mask);
+    /* Release the line, so a receiver can drive it again without the
+     * reference transmitter connected to the trigger. */
+    (void)burst_gpio_trigger_pin(pin, false);
+    if (err != ESP_OK) {
+        char answer[40];
+        snprintf(answer, sizeof(answer), "ERR reftx_send %d\n", (int)err);
+        reply(answer);
+        return true;
+    }
+    char answer[64];
+    snprintf(answer, sizeof(answer), "REFTX %u %" PRId64 " %" PRId64 "\n", done && reftx_acked ? 1u : 0u,
+             queued - edge, done ? reftx_done_at - edge : (int64_t)-1);
+    reply(answer);
+    return true;
+}
+
 #define BURST_ID       "C3SDR"
 #define BURST_MAX_RATE 6
 #include "burst_commands.h"
@@ -280,6 +430,7 @@ static void handle_command(char *line) {
     if (burst_version_command(line)) return;
     if (burst_gpio_command(line)) return;
     if (triggered_capture_command(line)) return;
+    if (reftx_command(line)) return;
 #ifdef RING_PROBE
     if (ring_probe_command(line)) return;
 #endif
@@ -294,7 +445,7 @@ static void handle_command(char *line) {
 #if CONFIG_ESP_SDR_UART_ENABLED
               "DUALSERIAL "
 #endif
-              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 TCAP\n");
+              "TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 TCAP REFTX\n");
     } else if (sscanf(line, "BANDWIDTH %u %c", &n, &extra) == 1 &&
                (!n || (n >= RX_BANDWIDTH_MIN && n <= RX_BANDWIDTH_MAX))) {
         rx_filter = rx_bandwidth_dcap(n);

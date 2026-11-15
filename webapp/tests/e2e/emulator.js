@@ -4,7 +4,7 @@
 (() => {
   const CRC = Uint32Array.from({ length: 256 }, (_, i) => { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
   const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-  const shared = { wireConnected: true, pendingSlave: null, log: [], captures: 0, requests: 0 };
+  const shared = { wireConnected: true, pendingSlaves: [], log: [], captures: 0, requests: 0 };
   window.__emu = shared;
   function makeSource(n) {
     // white noise source plus a tone; B sees it 3 samples later, rotated by 0.5 rad, with 20 kHz LO offset
@@ -36,6 +36,33 @@
     }
     return b;
   }
+  // Reference frame (and the target's ACK 10 us later) for REFTX: white noise
+  // bursts, as seen by an ideal receiver at the start of the trigger.
+  function makeBursts(n, delayUs, ack) {
+    const len = n + 8, src = { ref: [new Float32Array(len), new Float32Array(len)], tgt: [new Float32Array(len), new Float32Array(len)] };
+    const g = () => Math.sqrt(-2 * Math.log(Math.random() || 1e-9)) * Math.cos(2 * Math.PI * Math.random());
+    const s0 = Math.round((20 + Math.max(0, delayUs)) * 80), L = 30 * 80, gap = 10 * 80;
+    for (let j = s0; j < Math.min(len, s0 + L); j++) { src.ref[0][j] = 0.25 * g(); src.ref[1][j] = 0.25 * g(); }
+    if (ack) for (let j = s0 + L + gap; j < Math.min(len, s0 + 2 * L + gap); j++) { src.tgt[0][j] = 0.1 * g(); src.tgt[1][j] = 0.1 * g(); }
+    return src;
+  }
+  function burstPayload(src, n, offset, phase, cfo, refExtra) {
+    const b = new Uint8Array(2 * n), cr = Math.cos(refExtra), sr = Math.sin(refExtra);
+    for (let j = 0; j < n; j++) {
+      const k = j + offset, nr = 0.01 * (Math.random() - 0.5) * 3.4, ni = 0.01 * (Math.random() - 0.5) * 3.4;
+      const xr = src.ref[0][k] * cr - src.ref[1][k] * sr + src.tgt[0][k] + nr,
+        xi = src.ref[0][k] * sr + src.ref[1][k] * cr + src.tgt[1][k] + ni;
+      const p = phase - 2 * Math.PI * cfo * j / 80e6, c = Math.cos(p), s = Math.sin(p);
+      b[2 * j] = Math.max(-127, Math.min(127, Math.round((xr * c - xi * s) * 128))) & 255;
+      b[2 * j + 1] = Math.max(-127, Math.min(127, Math.round(-(xr * s + xi * c) * 128))) & 255;
+    }
+    return b;
+  }
+  function sendCapture(dev, n, payloadBytes, waitUs) {
+    dev.send(`TRIG 0 ${waitUs}\n`);
+    dev.send(`DATA ${n} ${crc32(payloadBytes).toString(16)} 205\n`);
+    dev.send(payloadBytes);
+  }
   class Device {
     constructor(name) { this.name = name; this.buf = ''; this.out = []; this.waiters = []; }
     send(x) { this.out.push(typeof x === 'string' ? new TextEncoder().encode(x) : x); this.wakeAll(); }
@@ -55,7 +82,7 @@
       let m;
       if ((m = /^SYNC (\d+)$/.exec(line))) return this.send(`SYNC ${m[1]}\n`);
       if (line === 'INFO') return this.send('C3SDR 6 burst 16380\n');
-      if (line === 'CAPS') return this.send('CAPS VERSION GPIO UARTBAUD RXLIMITS SERIALLEASE TUNEEXT GAIN HWAGC IQ8 TCAP\n');
+      if (line === 'CAPS') return this.send('CAPS VERSION GPIO UARTBAUD RXLIMITS SERIALLEASE TUNEEXT GAIN HWAGC IQ8 TCAP REFTX\n');
       if (line === 'TRANSPORT?') return this.send('TRANSPORT USB 0\n');
       if (line === 'RANGE?') return this.send('RANGE 1850 2650 1\n');
       if (line === 'LIMITS?') return this.send('LIMITS {"gain":[0,79,1],"bandwidth":null,"rates":[80000000,40000000,16000000],"bits":[8,10]}\n');
@@ -68,14 +95,15 @@
         const n = +m[1];
         this.send('ARMED\n');
         if (m[4] === 'S') {
-          const timer = setTimeout(() => { shared.pendingSlave = null; this.send('ERR trigger_timeout\n'); }, +m[5]);
-          shared.pendingSlave = { dev: this, n, timer };
+          const entry = { dev: this, n };
+          entry.timer = setTimeout(() => { shared.pendingSlaves = shared.pendingSlaves.filter((x) => x !== entry); this.send('ERR trigger_timeout\n'); }, +m[5]);
+          shared.pendingSlaves.push(entry);
           return;
         }
         // The master reads back its own line, so it always captures; the slave
         // only sees the edge when the wire is connected.
-        const slave = shared.wireConnected ? shared.pendingSlave : null;
-        if (slave) { clearTimeout(slave.timer); shared.pendingSlave = null; }
+        const slave = shared.wireConnected ? shared.pendingSlaves.shift() : null;
+        if (slave) clearTimeout(slave.timer);
         shared.captures++;
         const src = makeSource(n);
         for (const [dev, off, ph, cfo, rp] of [[this, 3, 0, 0], ...(slave ? [[slave.dev, 0, 0.5, 20e3, 0.6 + 0.05 * (Math.random() - 0.5)]] : [])]) {
@@ -85,6 +113,25 @@
           dev.send(p);
         }
         return;
+      }
+      if ((m = /^REFTX (\d+) (-?\d+) (\d+) (\d+) (\d+) ([NP]) ((?:[0-9A-F]{2}:){5}[0-9A-F]{2})$/.exec(line))) {
+        // Both receivers listen; this board raises the line and sends a frame
+        // that the target acknowledges (unless broadcast).
+        const delay = +m[2], broadcast = m[7] === 'FF:FF:FF:FF:FF:FF';
+        shared.lastReftx = line;
+        const slaves = shared.wireConnected ? shared.pendingSlaves.splice(0) : [];
+        for (const x of slaves) clearTimeout(x.timer);
+        shared.captures++;
+        if (slaves.length) {
+          const n = slaves[0].n, src = makeBursts(n, delay, !broadcast);
+          // Receiver "A" sees everything 3 samples earlier; "B" has a 20 kHz LO
+          // offset, its own LO phase and 0.6 rad more on the reference path.
+          for (const x of slaves) {
+            const isA = x.dev.name === 'A';
+            sendCapture(x.dev, n, burstPayload(src, n, isA ? 3 : 0, isA ? 0 : 0.5, isA ? 0 : 20e3, isA ? 0 : 0.6 + 0.05 * (Math.random() - 0.5)), 1234);
+          }
+        }
+        return this.send(`REFTX 1 ${delay} ${delay + 70}\n`);
       }
       this.send('ERR command\n');
     }
@@ -135,7 +182,7 @@
       },
     };
   }
-  const devs = [new Device('A'), new Device('B')];
+  const devs = [new Device('A'), new Device('B'), new Device('R')];
   const ports = devs.map(makePort), usb = devs.map(makeUsbDevice);
   const granted = { serial: [], usb: [] };
   const grant = (list, all) => async () => {

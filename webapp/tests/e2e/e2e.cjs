@@ -39,7 +39,7 @@ const server = http.createServer((req, res) => {
       }
       check((await page.inputValue('#trigger-mode')) === 'gpio', `${scheme}: GPIO trigger selected`);
       await page.click('#run');
-      await page.waitForFunction(() => Number(document.getElementById('m-count').textContent) >= 30, null, { timeout: 60000 });
+      await page.waitForFunction(() => parseInt(document.getElementById('m-count').textContent) >= 30, null, { timeout: 60000 });
       await page.click('#run');
       await page.waitForFunction(() => document.getElementById('message').textContent === 'Stopped.');
       const dphi = parseFloat(await page.textContent('#m-dphi'));
@@ -64,6 +64,45 @@ const server = http.createServer((req, res) => {
       }
       if (shots) await page.screenshot({ path: path.join(shots, `webapp-correlator-${scheme}.png`), fullPage: true });
       check(!errors.length, `${scheme}: no console errors ${errors.join(' ')}`);
+      await page.close();
+    }
+    // Reference transmitter: a third board drives the trigger and sends a frame
+    // that the target acknowledges; reference and target are bursts in time.
+    {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: shots ? 2 : 1, colorScheme: 'light' });
+      const errors = [];
+      page.on('pageerror', (e) => errors.push(String(e)));
+      page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+      await page.addInitScript({ path: path.join(__dirname, 'emulator.js') });
+      await page.goto(base + '/index.html');
+      for (const n of ['A', 'B', 'R']) {
+        await page.click('#connect-' + n);
+        await page.waitForFunction((n) => document.getElementById('status-' + n).textContent.includes('C3'), n);
+      }
+      check((await page.textContent('#status-R')).includes('REFTX'), 'reftx: transmitter reports REFTX');
+      await page.selectOption('#trigger-mode', 'reftx');
+      check((await page.inputValue('#analysis-mode')) === 'bursts', 'reftx: analysis switches to bursts');
+      await page.fill('#ref-mac', '02:00:5e:10:00:01');
+      await page.fill('#ref-delay', '15');
+      await page.click('#run');
+      await page.waitForFunction(() => parseInt(document.getElementById('m-count').textContent) >= 25, null, { timeout: 60000 });
+      await page.click('#run');
+      await page.waitForFunction(() => document.getElementById('message').textContent === 'Stopped.');
+      const dphi = parseFloat(await page.textContent('#m-dphi'));
+      check(Math.abs(dphi - 34.4) < 3, `reftx: mean dphi ${dphi}° (expected 34.4°)`);
+      check((await page.textContent('#m-ref')).includes('ACK received'), 'reftx: ACK reported');
+      check((await page.textContent('#m-bursts')).split(',').length === 2, `reftx: two bursts (${await page.textContent('#m-bursts')})`);
+      check((await page.textContent('#warnings')) === '', `reftx: no warnings ${await page.textContent('#warnings')}`);
+      check(
+        (await page.evaluate(() => window.__emu.lastReftx)) === 'REFTX 4 15 7 24 8 N 02:00:5E:10:00:01',
+        'reftx: command carries the settings',
+      );
+      if (shots) await page.screenshot({ path: path.join(shots, 'webapp-reference-tx.png'), fullPage: true });
+      await page.fill('#ref-mac', '');
+      await page.click('#capture');
+      await page.waitForFunction(() => document.getElementById('message').textContent.startsWith('Captured'), null, { timeout: 15000 });
+      check((await page.textContent('#warnings')).includes('Only 1 burst'), 'reftx: broadcast gives one burst');
+      check(!errors.length, `reftx: no console errors ${errors.join(' ')}`);
       await page.close();
     }
     // WebUSB: the second Connect reuses the granted device (no chooser), also
