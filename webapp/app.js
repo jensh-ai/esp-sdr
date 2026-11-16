@@ -632,7 +632,12 @@
       : '–';
     $('m-bursts').textContent = r.bursts
       ? r.bursts.length
-        ? r.bursts.map((b) => `${b.startUs.toFixed(0)}–${b.endUs.toFixed(0)} µs`).join(', ')
+        ? r.bursts
+            .map(
+              (b) =>
+                `${b.startUs.toFixed(0)}–${b.endUs.toFixed(0)} µs (${fmt(b.snrA, 0)}/${fmt(b.snrB, 0)} dB)`,
+            )
+            .join(', ')
         : 'none'
       : '–';
     $('m-count').textContent = skipped ? `${history.length} (+${skipped} skipped)` : String(history.length);
@@ -652,6 +657,22 @@
             (x && !x.broadcast && !x.acked ? ' The target did not acknowledge: check its MAC and the Wi-Fi channel.' : '') +
             (x ? ' Adjust the TX delay so that the frame and its ACK fall into the snapshot.' : ''),
         );
+      for (const [i, label] of [
+        [opt.refBurst - 1, 'Reference'],
+        [opt.targetBurst - 1, 'Target'],
+      ]) {
+        const b = r.bursts[i];
+        if (!b) continue;
+        const weak = [
+          ['A', b.snrA],
+          ['B', b.snrB],
+        ].filter(([, v]) => v < 10);
+        if (weak.length)
+          warn.push(
+            `${label} burst is weak in receiver ${weak.map(([n, v]) => `${n} (${v.toFixed(0)} dB)`).join(' and ')}` +
+              (label === 'Reference' ? ': raise the TX power or move the transmitter.' : '.'),
+          );
+      }
     } else if (r.cs.delayRuns === 0)
       warn.push(
         'No wideband coherent signal: the sampling time offset cannot be measured, so the phase difference between bands at different frequencies is unreliable.',
@@ -897,11 +918,47 @@
   };
   const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
 
+  // ---------- settings (all panel inputs) ----------
+  // Every input and select of the capture, transmitter and analysis panels,
+  // by id. Saved in exports, restored on import, and kept in localStorage.
+  const settingFields = () =>
+    Array.from(document.querySelectorAll('main .panel input[id], main .panel select[id]')).filter(
+      (el) => el.type !== 'file' && el.id !== 'sniff-ms',
+    );
+  function collectUi() {
+    const ui = {};
+    for (const el of settingFields()) ui[el.id] = el.value;
+    ui.calibrationDeg = calibration * DEG;
+    return ui;
+  }
+  function applyUi(ui) {
+    if (!ui) return;
+    for (const el of settingFields()) {
+      if (!(el.id in ui)) continue;
+      if (el.tagName === 'SELECT' && ![...el.options].some((o) => o.value === String(ui[el.id]) && !o.disabled))
+        continue; // e.g. a trigger mode the connected boards do not support
+      el.value = ui[el.id];
+    }
+    if (Number.isFinite(ui.calibrationDeg)) calibration = ui.calibrationDeg / DEG;
+  }
+  const uiKey = 'dual-sdr.settings';
+  function saveUi() {
+    try {
+      localStorage.setItem(uiKey, JSON.stringify(collectUi()));
+    } catch {}
+  }
+  function loadUi() {
+    try {
+      applyUi(JSON.parse(localStorage.getItem(uiKey)));
+    } catch {}
+  }
+
   function exportPair() {
     if (!lastPair) return;
     const out = {
       ...lastPair,
       analysis: analysisSettings(lastPair.settings.frequency),
+      ui: collectUi(),
       devices: lastPair.devices.map(({ bytes, ...d }) => ({ ...d, format: `iq${lastPair.settings.bits}`, data: toBase64(bytes) })),
     };
     const blob = new Blob([JSON.stringify(out)], { type: 'application/json' }),
@@ -921,7 +978,8 @@
       $('frequency').value = s.frequency;
       $('rate').value = String(s.rate);
       $('bits').value = String(s.bits);
-      if (data.analysis) {
+      if (data.ui) applyUi(data.ui);
+      else if (data.analysis) {
         const a = data.analysis;
         $('ref-offset').value = a.refHz / 1e3;
         $('ref-width').value = a.refWidthHz / 1e3;
@@ -930,7 +988,8 @@
         $('baseline').value = a.baselineM * 100;
       }
       process(pair);
-      message(`Loaded ${file.name}.`);
+      saveUi();
+      message(`Loaded ${file.name}${data.ui ? ' with all settings' : ''}.`);
     } catch (e) {
       message(e.message || String(e), true);
     }
@@ -953,12 +1012,14 @@
   });
   $('calibrate').addEventListener('click', () => {
     calibration = DualDSP.wrap(calibration + stats().mean);
+    setTimeout(saveUi);
     if (lastPair) lastResult = analyzePair(lastPair);
     render();
     updateButtons();
   });
   $('clear-calibration').addEventListener('click', () => {
     calibration = 0;
+    saveUi();
     if (lastPair) lastResult = analyzePair(lastPair);
     render();
   });
@@ -1010,6 +1071,10 @@
   window.addEventListener('resize', render);
   bindErrors();
   initInterfaces();
+  loadUi();
+  document.querySelector('main').addEventListener('change', (e) => {
+    if (e.target.closest('.panel')) saveUi();
+  });
   // Frame and ACK share the channel: analyze them as bursts in time.
   $('trigger-mode').addEventListener('change', () => {
     if ($('trigger-mode').value === 'reftx') $('analysis-mode').value = 'bursts';

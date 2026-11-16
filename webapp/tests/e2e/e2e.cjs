@@ -117,6 +117,18 @@ const server = http.createServer((req, res) => {
       await page.click('#capture');
       await page.waitForFunction(() => document.getElementById('message').textContent.startsWith('Captured'), null, { timeout: 15000 });
       check((await page.textContent('#warnings')).includes('Only 1 burst'), 'reftx: broadcast gives one burst');
+      await page.fill('#ref-delay', '-650');
+      await page.dispatchEvent('#ref-delay', 'change');
+      const [download] = await Promise.all([page.waitForEvent('download'), page.click('#export')]);
+      const exported = JSON.parse(require('fs').readFileSync(await download.path(), 'utf8'));
+      check(exported.ui?.['ref-delay'] === '-650' && exported.ui?.['ref-trigger'] === 'S' && exported.ui?.['analysis-mode'] === 'bursts', 'export: contains all settings');
+      await page.reload();
+      check((await page.inputValue('#ref-delay')) === '-650' && (await page.inputValue('#analysis-mode')) === 'bursts', 'settings survive a reload');
+      await page.fill('#ref-delay', '-700');
+      await page.dispatchEvent('#ref-delay', 'change');
+      await page.setInputFiles('#import-file', await download.path());
+      await page.waitForFunction(() => document.getElementById('message').textContent.includes('with all settings'));
+      check((await page.inputValue('#ref-delay')) === '-650', 'import: restores the settings');
       check(!errors.length, `reftx: no console errors ${errors.join(' ')}`);
       await page.close();
     }

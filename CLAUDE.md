@@ -149,7 +149,14 @@ Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
   Genauigkeit in Simulation: Lag ≈ 0,1 Sample, Δφ < 0,06 rad.
   CFO-Lag-Suche bewertet die absolute Spitzenleistung (Spitze/Mittel versagt
   bei kurzen Bursts).
-- Export/Import eines Paars als JSON (Python-Snippet in `webapp/README.md`).
+- Export/Import eines Paars als JSON (Python-Snippet in `webapp/README.md`),
+  inkl. `ui` = alle Panel-Eingaben nach id (+ Kalibrierung); dieselben Werte
+  bleiben in `localStorage` (`dual-sdr.settings`). Burst-Metrik zeigt Pegel
+  je Empfänger über Rauschen (`burstLevels`), Warnung < 10 dB.
+- Hardware 2026-11-16 (fw a5bfdb9, Timer −760 µs, 24/6 Mbps, 2 dBm): Frame ab
+  ~10 µs vollständig, ACK 16 µs danach; Referenz nur 13–16 dB über Rauschen,
+  Router-ACK 25–31 dB. Nutzer: „manchmal sieht nur ein ESP die Referenz“ –
+  Ursache offen (Verdacht: knappe Referenz + Mehrwege-Schwund).
 - Hosting: `.github/workflows/pages.yml` veröffentlicht `webapp/` aus `main`
   (Settings → Pages → Source: GitHub Actions, vom Nutzer noch zu aktivieren).
   Lokal: `cd webapp && python3 -m http.server 8000`.

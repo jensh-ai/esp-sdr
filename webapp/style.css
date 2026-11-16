@@ -327,3 +327,6 @@ label.inline input {
   color: var(--muted);
   border: 1px solid var(--border);
 }
+.metrics .wide-metric {
+  grid-column: span 2;
+}

@@ -715,6 +715,40 @@
     return (lo + hi) / 2;
   }
 
+  // Level of each burst in each receiver, in dB over that receiver's noise
+  // (mean power outside all bursts): snrA, snrB. b aligned by the lag k.
+  function burstLevels(a, b, k, bursts) {
+    const n = a.re.length,
+      inside = new Uint8Array(n);
+    for (const x of bursts) inside.fill(1, Math.max(0, x.start - 40), Math.min(n, x.end + 40));
+    let na = 0,
+      nb = 0,
+      count = 0;
+    for (let t = 0; t < n; t++) {
+      const u = t - k;
+      if (inside[t] || u < 0 || u >= b.re.length) continue;
+      na += a.re[t] * a.re[t] + a.im[t] * a.im[t];
+      nb += b.re[u] * b.re[u] + b.im[u] * b.im[u];
+      count++;
+    }
+    na = na / (count || 1) || 1e-30;
+    nb = nb / (count || 1) || 1e-30;
+    for (const x of bursts) {
+      let pa = 0,
+        pb = 0,
+        m = 0;
+      for (let t = x.start; t < x.end; t++) {
+        const u = t - k;
+        if (u < 0 || u >= b.re.length) continue;
+        pa += a.re[t] * a.re[t] + a.im[t] * a.im[t];
+        pb += b.re[u] * b.re[u] + b.im[u] * b.im[u];
+        m++;
+      }
+      x.snrA = 10 * Math.log10(pa / (m || 1) / na);
+      x.snrB = 10 * Math.log10(pb / (m || 1) / nb);
+    }
+  }
+
   // RF frequency of the target signal, for the angle.
   function targetFrequency(opt) {
     return (opt.rfHz ?? 0) + (opt.mode === 'bursts' ? 0 : (opt.targetHz ?? 0));
@@ -773,6 +807,7 @@
       cs.lag = lag;
       const k = Math.round(cs.lag),
         bAligned = fracDelay(b, cs.lag - k);
+      burstLevels(a, bAligned, k, bursts);
       const pick = (i) => (bursts[i] ? burstPhase(a, bAligned, k, bursts[i]) : { phase: NaN, coherence: 0 });
       ref = pick((opt.refBurst ?? 1) - 1);
       target = pick((opt.targetBurst ?? 2) - 1);
@@ -815,6 +850,7 @@
     findBursts,
     burstPhase,
     burstLag,
+    burstLevels,
     burstCfo,
     fracDelay,
     targetFrequency,

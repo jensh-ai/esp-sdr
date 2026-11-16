@@ -10,7 +10,8 @@ ESP32-C3 boards), takes one I/Q snapshot from each, and cross-correlates them:
   *target* band; Δφ = φ_target − φ_ref cancels the receivers' unknown LO phase
 - **Angle of arrival** from Δφ, the antenna spacing and the RF frequency, with
   averaging and a "set current direction as 0°" calibration
-- Export/import of a snapshot pair as JSON for offline analysis
+- Export/import of a snapshot pair as JSON for offline analysis, including
+  all settings (restored on import); the settings are also kept in the browser
 
 It also contains the firmware installer (`flash.html`) with the prebuilt
 ESP32-C3 firmware in `firmware/`.
@@ -118,6 +119,9 @@ Steps 1 to 4 are the same; step 5 changes:
    alike and cancels.
 
 *Reference burst #* and *Target burst #* select the bursts (default 1 and 2).
+The *Bursts* metric shows each burst's level over the noise in A and B; below
+10 dB the app warns (a weak reference: raise the TX power or move the
+transmitter).
 
 ## Hosting
 
