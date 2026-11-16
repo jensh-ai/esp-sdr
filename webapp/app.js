@@ -109,6 +109,7 @@
     return `${r.deviceName} · ${r.identity}${rev} · rates ${r.rxRates.map((x) => x / 1e6).join('/')} MS/s · gain ${r.gainMin}–${r.gainMax}`;
   }
 
+  let reftxOffered = false;
   function applyCapabilities() {
     const radios = names.map((n) => devices[n].radio).filter((r) => r.port);
     if (!radios.length) return;
@@ -131,7 +132,12 @@
       sel = $('trigger-mode');
     sel.querySelector('[value=gpio]').disabled = !tcap;
     sel.querySelector('[value=reftx]').disabled = !reftx;
-    if (sel.selectedOptions[0]?.disabled || (sel.value === 'software' && tcap)) sel.value = tcap ? 'gpio' : 'software';
+    if (reftx && !reftxOffered) {
+      // A connected reference transmitter takes over the trigger line.
+      sel.value = 'reftx';
+      $('analysis-mode').value = 'bursts';
+    } else if (sel.selectedOptions[0]?.disabled || (sel.value === 'software' && tcap)) sel.value = tcap ? 'gpio' : 'software';
+    reftxOffered = reftx;
   }
 
   // radio.js does not keep the capability list, so ask for TCAP/REFTX separately.

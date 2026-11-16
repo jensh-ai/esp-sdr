@@ -176,8 +176,9 @@ reference signal into every snapshot (`REFTX` in
 
 1. Connect its trigger pin and GND to the same line as A and B. Both receivers
    then only listen.
-2. Choose *Trigger: Reference transmitter*. The analysis switches to *Bursts
-   in time*.
+2. Connecting it selects *Trigger: Reference transmitter* and the analysis
+   *Bursts in time*. (*GPIO line* stays available: then A drives the line and
+   the transmitter is idle.)
 3. Per capture it sends one 802.11 frame on the chosen *Wi-Fi channel*. With
    an empty *Target MAC*, the frame is a broadcast: a known reference, no
    reply. With the MAC of a Wi-Fi device, that device answers with an ACK

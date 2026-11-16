@@ -80,6 +80,7 @@ const server = http.createServer((req, res) => {
         await page.waitForFunction((n) => document.getElementById('status-' + n).textContent.includes('C3'), n);
       }
       check((await page.textContent('#status-R')).includes('REFTX'), 'reftx: transmitter reports REFTX');
+      check((await page.inputValue('#trigger-mode')) === 'reftx', 'reftx: connecting the transmitter selects its trigger');
       await page.click('#sniff');
       await page.waitForFunction(() => document.querySelectorAll('#sniff-body tr').length === 3);
       check((await page.evaluate(() => window.__emu.lastSniff)) === 'SNIFF 7 1000', 'sniff: listens on the channel');
