@@ -76,8 +76,13 @@ Rate nur bei gestopptem Wi-Fi setzbar), Antwort `REFTX <acked> <queued_us>
 <done_us>` aus dem TX-Done-Callback. Unicast an eine fremde MAC → deren ACK
 10 µs später = Zielsignal im selben Snapshot. Delay ist vom Nutzer per GUI
 einzustellen (Default 0), MAC-Wartezeit (CSMA) variiert. **Auf Hardware
-ungetestet**: ob der PHY nach der RX-Konfiguration (pbus) über esp_wifi_stop/
-start wieder sendet, ist offen.
+ungetestet**. Erster Hardware-Test (2026-11-16): weder REFTX-Burst noch
+SNIFF-Treffer, weil `prepare_rx` PBUS-Zeilen (0/1, 1/1, 1/2, 4/1, 5/1 via
+`rom_pbus_xpd_tx_off`/`rx_on` → `rom_pbus_force_test`) und PBUS-/RX-Clock-Modi
+setzt, die ein Wi-Fi-Neustart nicht zurücksetzt. Seitdem `rf_mode_save()`
+(beim ersten `prepare_rx` nach dem Boot) und `rf_mode_restore()` vor
+REFTX/SNIFF, dazu AGC freigeben und Kanal per Umweg neu setzen (`wifi_tune`).
+Wirkung auf Hardware noch ungeprüft.
 
 `SNIFF <channel> <ms>` (nur C3): Wi-Fi-Neustart mit AGC, Promiscuous
 (MGMT+DATA), Tabelle max. 48 Sender → `STA <mac> <frames> <rssi_avg>

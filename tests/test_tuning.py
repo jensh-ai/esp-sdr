@@ -160,6 +160,7 @@ static void on(unsigned v){assert(v==1);check_normal();}
 #define rom_pbus_xpd_tx_off check_normal
 #define phy_pbus_xpd_rx_on on
 #define rom_pbus_xpd_rx_on on
+static void rf_mode_save(void) {}
 #define phy_set_rxclk_en on
 #define rom_set_rxclk_en on
 #define set_rxclk_en on

@@ -129,8 +129,11 @@ completion, relative to the trigger edge (`done-us` is `-1` without a report
 within 50 ms). The line stays high for at least 2 ms and is then released to
 an input with pull-down.
 
-The board switches Wi-Fi from NULL to station mode for this (once per rate),
-so the next capture on it prepares the receiver again.
+The board switches Wi-Fi from NULL to station mode for this (once per rate).
+Before that it restores the RF front-end settings saved at boot (the receiver
+setup powers the TX chain down and keeps RX on), releases the forced gain so
+that it can receive the ACK, and retunes to the channel. The next capture on
+the board prepares the receiver again.
 
 Errors: `ERR reftx_args`, `ERR rate`, `ERR trigger_pin`, `ERR reftx_wifi`
 (Wi-Fi setup failed), `ERR reftx_send <code>` (`esp_wifi_80211_tx` failed).
@@ -141,7 +144,8 @@ Only address your own devices: every frame is a real transmission.
 
 `SNIFF <channel> <ms>` (channel 1 to 13, 10 to 5000 ms) lists the
 transmitters heard on a Wi-Fi channel, to pick a target address for `REFTX`.
-The board restarts Wi-Fi with automatic gain, listens to management and data
+The board restores the RF settings from boot, restarts Wi-Fi with automatic
+gain, listens to management and data
 frames in promiscuous mode, and replies one line per transmitter address
 (at most 48), most frames first:
 

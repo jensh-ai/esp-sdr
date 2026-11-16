@@ -83,11 +83,41 @@ static void reply(const char *s) {
 #include "burst_gain.h"
 #include "burst_limits.h"
 
+/* The receiver setup below writes PBUS rows of the RF front end (TX chain
+ * powered down, RX kept on in every state) and the PBUS/RX clock modes.
+ * Restarting Wi-Fi does not undo them, so neither 802.11 transmission
+ * (REFTX) nor frame reception (SNIFF) works afterwards. Keep the values from
+ * boot, before the first receiver setup, and restore them for Wi-Fi use. */
+extern unsigned rom_pbus_rd(unsigned row, unsigned field);
+extern void rom_pbus_force_test(unsigned row, unsigned field, unsigned value);
+static const uint8_t rf_rows[][2] = {{0, 1}, {1, 1}, {1, 2}, {4, 1}, {5, 1}};
+static uint16_t rf_row_saved[sizeof(rf_rows) / sizeof(rf_rows[0])];
+static uint32_t rf_mode_saved[3];
+static bool rf_saved;
+static void rf_mode_save(void) {
+    if (rf_saved) return;
+    for (unsigned j = 0; j < sizeof(rf_rows) / sizeof(rf_rows[0]); j++)
+        rf_row_saved[j] = (uint16_t)rom_pbus_rd(rf_rows[j][0], rf_rows[j][1]);
+    rf_mode_saved[0] = REG_READ(0x60006104u) & 1u;           /* PBUS force/debug mode */
+    rf_mode_saved[1] = REG_READ(0x6000610cu) & (1u << 27);   /* PBUS work mode */
+    rf_mode_saved[2] = REG_READ(0x60006110u) & 0xc000u;      /* RX clock enable */
+    rf_saved = true;
+}
+static void rf_mode_restore(void) {
+    if (!rf_saved) return;
+    for (unsigned j = 0; j < sizeof(rf_rows) / sizeof(rf_rows[0]); j++)
+        rom_pbus_force_test(rf_rows[j][0], rf_rows[j][1], rf_row_saved[j]);
+    REG_WRITE(0x60006104u, (REG_READ(0x60006104u) & ~1u) | rf_mode_saved[0]);
+    REG_WRITE(0x6000610cu, (REG_READ(0x6000610cu) & ~(1u << 27)) | rf_mode_saved[1]);
+    REG_WRITE(0x60006110u, (REG_READ(0x60006110u) & ~0xc000u) | rf_mode_saved[2]);
+}
+
 static void prepare_rx(void) {
     if (rx_ready && !rx_recalibration_stale()) {
         if (gain_mode == GAIN_MANUAL) gain_applied = rx_gain_verified_check(gain_code);
         return;
     }
+    rf_mode_save();
     tune_rx(frequency_mhz);
     stop_tx_tone(1);
     rom_pbus_workmode();
@@ -322,6 +352,7 @@ static bool reftx_setup(int rate) {
     if (!reftx_sem && !(reftx_sem = xSemaphoreCreateBinary())) return false;
     reftx_configured_rate = -1;
     (void)esp_wifi_stop();
+    rf_mode_restore();
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
         esp_wifi_config_80211_tx_rate(WIFI_IF_STA, (wifi_phy_rate_t)rate) != ESP_OK || esp_wifi_start() != ESP_OK)
         return false;
@@ -329,6 +360,13 @@ static bool reftx_setup(int rate) {
     if (esp_wifi_register_80211_tx_cb(reftx_done) != ESP_OK) return false;
     reftx_configured_rate = rate;
     return true;
+}
+
+/* The receiver may have retuned the PLL behind the driver's back; a driver
+ * that believes it is already on the channel would skip the PHY setup. */
+static esp_err_t wifi_tune(unsigned channel) {
+    (void)esp_wifi_set_channel(channel == 1 ? 2 : 1, WIFI_SECOND_CHAN_NONE);
+    return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
 static int reftx_frame(uint8_t *f, char type, const uint8_t *to) {
@@ -368,13 +406,14 @@ static bool reftx_command(const char *line) {
         return true;
     }
     rx_ready = false; /* the next capture prepares the receiver again */
+    /* Automatic gain, so that the transmitter also receives the ACK. */
+    (void)rx_gain_verified_apply(false, gain_code);
     if (!reftx_setup(rate)) {
         reply("ERR reftx_wifi\n");
         return true;
     }
     rx_lo_select(false);
-    if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
-        esp_wifi_set_max_tx_power((int8_t)power) != ESP_OK) {
+    if (wifi_tune(channel) != ESP_OK || esp_wifi_set_max_tx_power((int8_t)power) != ESP_OK) {
         reply("ERR reftx_wifi\n");
         return true;
     }
@@ -493,11 +532,11 @@ static bool sniff_command(const char *line) {
     reftx_configured_rate = -1;
     (void)rx_gain_verified_apply(false, gain_code);
     (void)esp_wifi_stop();
+    rf_mode_restore();
     rx_lo_select(false);
     wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
     if (esp_wifi_start() != ESP_OK || esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK ||
-        esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
-        esp_wifi_set_promiscuous_filter(&filter) != ESP_OK || esp_wifi_set_promiscuous_rx_cb(sniff_rx) != ESP_OK) {
+        wifi_tune(channel) != ESP_OK || esp_wifi_set_promiscuous_filter(&filter) != ESP_OK || esp_wifi_set_promiscuous_rx_cb(sniff_rx) != ESP_OK) {
         reply("ERR sniff_wifi\n");
         return true;
     }
