@@ -104,16 +104,22 @@ Errors: `ERR trigger_args`, `ERR rate`, `ERR trigger_pin` (pin not available),
 
 ### Reference transmitter (ESP32-C3, `REFTX` in `CAPS`)
 
-`REFTX <pin> <delay-us> <channel> <mbps> <power> <N|P> <mac>`
+`REFTX <pin> <H|S> <delay-us> <channel> <mbps> <power> <N|P> <mac>`
 
 An optional third board drives the trigger line instead of receiver A: both
 receivers wait with `TCAP… S`. When both report `ARMED`, the host sends
-`REFTX`. The board raises the line and sends one 802.11 frame:
+`REFTX`. The board sends one 802.11 frame, and the trigger edge comes from:
 
-- `<delay-us>` (−5000 to 5000): time from the trigger edge to handing the
-  frame to the Wi-Fi driver. Negative values queue the frame first and raise
-  the line `|delay-us|` later. The driver still waits for a free channel, so
-  the frame starts later than the hand-over, by a varying amount.
+- `H` (hardware): the start of the transmission. The radio's antenna-select
+  signal is routed to `<pin>`, with antenna 1 for transmitting and antenna 0
+  for receiving, so the line rises when the frame starts. An interrupt then
+  latches it high as a plain GPIO output. `<delay-us>` is ignored. Without an
+  edge the reply is `ERR reftx_no_edge`.
+- `S` (software): `<delay-us>` (−5000 to 5000) is the time from the edge to
+  handing the frame to the Wi-Fi driver; negative values queue the frame
+  first and raise the line `|delay-us|` later. On hardware the frame left
+  about 760 µs after the hand-over (driver and channel access), varying.
+
 - `<channel>` 1 to 13; `<mbps>` one of 1, 2, 5 (5.5), 11, 6, 9, 12, 18, 24,
   36, 48, 54; `<power>` in 0.25 dBm, 8 to 84 (2 to 21 dBm).
 - `N`: null-data frame, `P`: probe request (wildcard SSID).
@@ -136,7 +142,8 @@ that it can receive the ACK, and retunes to the channel. The next capture on
 the board prepares the receiver again.
 
 Errors: `ERR reftx_args`, `ERR rate`, `ERR trigger_pin`, `ERR reftx_wifi`
-(Wi-Fi setup failed), `ERR reftx_send <code>` (`esp_wifi_80211_tx` failed).
+(Wi-Fi setup failed), `ERR reftx_antenna` (antenna-select setup failed),
+`ERR reftx_no_edge`, `ERR reftx_send [<code>]` (`esp_wifi_80211_tx` failed).
 
 Only address your own devices: every frame is a real transmission.
 

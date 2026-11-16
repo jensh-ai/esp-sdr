@@ -599,22 +599,21 @@
     return hz;
   }
 
-  // Phase of A·B* over one burst (b CFO-corrected, aligned by the lag; the
+  // Cross spectrum A·B* of one burst (b CFO-corrected, aligned by the lag; the
   // fractional part of the lag is removed in the frequency domain, as in
-  // crossSpectrum()). For two bursts on the same channel, a residual time
-  // offset changes both phases alike, so their difference does not depend on it.
-  function burstPhase(a, b, lag, burst) {
+  // crossSpectrum()). Bins in FFT order; null if the burst is outside B.
+  function burstCross(a, b, lag, burst) {
     const k = Math.round(lag),
       frac = lag - k,
       from = Math.max(burst.start, k),
       to = Math.min(burst.end, b.re.length + k),
-      len = Math.max(0, to - from),
-      N = nextPow2(2 * len),
+      len = Math.max(0, to - from);
+    if (!len) return null;
+    const N = nextPow2(2 * len),
       xr = new Float64Array(N),
       xi = new Float64Array(N),
       yr = new Float64Array(N),
       yi = new Float64Array(N);
-    if (!len) return { phase: NaN, coherence: 0, powerA: 0, powerB: 0 };
     for (let j = 0; j < len; j++) {
       xr[j] = a.re[from + j];
       xi[j] = a.im[from + j];
@@ -623,9 +622,9 @@
     }
     fft(xr, xi);
     fft(yr, yi);
-    let re = 0,
-      im = 0,
-      pa = 0,
+    const re = new Float64Array(N),
+      im = new Float64Array(N);
+    let pa = 0,
       pb = 0;
     for (let i = 0; i < N; i++) {
       const ph = (TAU * (i < N / 2 ? i : i - N) * frac) / N,
@@ -633,12 +632,87 @@
         s = Math.sin(ph),
         cr = xr[i] * yr[i] + xi[i] * yi[i],
         ci = xi[i] * yr[i] - xr[i] * yi[i];
-      re += cr * c - ci * s;
-      im += cr * s + ci * c;
+      re[i] = cr * c - ci * s;
+      im[i] = cr * s + ci * c;
       pa += xr[i] * xr[i] + xi[i] * xi[i];
       pb += yr[i] * yr[i] + yi[i] * yi[i];
     }
-    return { phase: Math.atan2(im, re), coherence: pa && pb ? (re * re + im * im) / (pa * pb) : 0, powerA: pa, powerB: pb };
+    return { re, im, pa, pb, N };
+  }
+
+  // Phase of A·B* over one burst. For two bursts on the same channel, a
+  // residual time offset changes both phases alike, so their difference does
+  // not depend on it.
+  function burstPhase(a, b, lag, burst) {
+    const x = burstCross(a, b, lag, burst);
+    if (!x) return { phase: NaN, coherence: 0, powerA: 0, powerB: 0 };
+    let re = 0,
+      im = 0;
+    for (let i = 0; i < x.N; i++) {
+      re += x.re[i];
+      im += x.im[i];
+    }
+    return {
+      phase: Math.atan2(im, re),
+      coherence: x.pa && x.pb ? (re * re + im * im) / (x.pa * x.pb) : 0,
+      powerA: x.pa,
+      powerB: x.pb,
+    };
+  }
+
+  // Time offset from the bursts alone: the fractional lag that maximizes
+  // |sum A·B*| over the bursts (the cross-correlation peak, evaluated only
+  // where the bursts are). A short burst in a long snapshot hardly influences
+  // the estimate over the whole snapshot.
+  function burstLag(a, b, lag, bursts) {
+    const score = (l) => {
+      let total = 0;
+      for (const burst of bursts) {
+        const x = burstCross(a, b, l, burst);
+        if (!x) continue;
+        let re = 0,
+          im = 0;
+        for (let i = 0; i < x.N; i++) {
+          re += x.re[i];
+          im += x.im[i];
+        }
+        total += Math.hypot(re, im) / x.N;
+      }
+      return total;
+    };
+    // Integer search around the start value, then golden-section refinement.
+    let best = Math.round(lag),
+      bestScore = -1;
+    for (let l = best - 4; l <= best + 4; l++) {
+      const v = score(l);
+      if (v > bestScore) {
+        bestScore = v;
+        best = l;
+      }
+    }
+    const g = (Math.sqrt(5) - 1) / 2;
+    let lo = best - 1,
+      hi = best + 1,
+      x1 = hi - g * (hi - lo),
+      x2 = lo + g * (hi - lo),
+      f1 = score(x1),
+      f2 = score(x2);
+    while (hi - lo > 0.01) {
+      if (f1 > f2) {
+        hi = x2;
+        x2 = x1;
+        f2 = f1;
+        x1 = hi - g * (hi - lo);
+        f1 = score(x1);
+      } else {
+        lo = x1;
+        x1 = x2;
+        f1 = f2;
+        x2 = lo + g * (hi - lo);
+        f2 = score(x2);
+      }
+    }
+    return (lo + hi) / 2;
   }
 
   // RF frequency of the target signal, for the angle.
@@ -680,16 +754,23 @@
           if (done) break;
         }
       };
+      // The time offset and the LO offset come from the bursts alone,
+      // alternately, until both settle.
       cfo.burstResidualHz = 0;
-      for (let it = 0; it < 4 && bursts.length; it++) {
-        const k0 = Math.round(cs.lag),
-          residual = burstCfo(a, fracDelay(b, cs.lag - k0), k0, bursts, fs);
+      let lag = cs.lag;
+      for (let it = 0; it < 8 && bursts.length; it++) {
+        const next = burstLag(a, b, lag, bursts),
+          dLag = next - lag;
+        lag = next;
+        const k0 = Math.round(lag),
+          residual = burstCfo(a, fracDelay(b, lag - k0), k0, bursts, fs);
         cfo.hz += residual;
         cfo.burstResidualHz += residual;
         b = rotate(b, residual, fs);
-        refine();
-        if (Math.abs(residual) < 2) break;
+        if (Math.abs(residual) < 2 && Math.abs(dLag) < 0.01) break;
       }
+      cs = crossSpectrum(a, b, lag, fs, opt.nfft ?? 1024);
+      cs.lag = lag;
       const k = Math.round(cs.lag),
         bAligned = fracDelay(b, cs.lag - k);
       const pick = (i) => (bursts[i] ? burstPhase(a, bAligned, k, bursts[i]) : { phase: NaN, coherence: 0 });
@@ -733,6 +814,9 @@
     bandPhase,
     findBursts,
     burstPhase,
+    burstLag,
+    burstCfo,
+    fracDelay,
     targetFrequency,
     angleFromPhase,
     circularMean,

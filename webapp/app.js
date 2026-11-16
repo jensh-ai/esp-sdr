@@ -47,8 +47,9 @@
     }
     const refOn = !!refDevice.radio.port;
     $('sniff').disabled = busy || running || !sniffer();
-    for (const id of ['ref-channel', 'ref-mac', 'ref-delay', 'ref-frame', 'ref-rate', 'ref-power'])
+    for (const id of ['ref-channel', 'ref-mac', 'ref-trigger', 'ref-frame', 'ref-rate', 'ref-power'])
       $(id).disabled = running;
+    $('ref-delay').disabled = running || $('ref-trigger').value === 'H';
     $('device-R').classList.toggle('connected', refOn);
   }
 
@@ -70,6 +71,7 @@
       c.reference = {
         channel: Math.round(num('ref-channel')),
         mac: mac || 'FF:FF:FF:FF:FF:FF',
+        trigger: $('ref-trigger').value,
         delayUs: Math.round(num('ref-delay')),
         frame: $('ref-frame').value,
         rateMbps: Number($('ref-rate').value),
@@ -400,7 +402,7 @@
     const x = c.reference;
     try {
       await r.command(
-        `REFTX ${c.triggerPin} ${x.delayUs} ${x.channel} ${x.rateMbps} ${x.powerDbm * 4} ${x.frame} ${x.mac}`,
+        `REFTX ${c.triggerPin} ${x.trigger} ${x.delayUs} ${x.channel} ${x.rateMbps} ${x.powerDbm * 4} ${x.frame} ${x.mac}`,
       );
       const reply = await r.line(),
         m = /^REFTX ([01]) (-?\d+) (-?\d+)$/.exec(reply);
@@ -413,7 +415,10 @@
       };
     } catch (e) {
       if (!r.failed) await r.synchronize().catch(() => {});
-      throw Error(`Reference transmitter: ${e.message}`);
+      const hint = /reftx_no_edge|reftx_antenna/.test(e.message)
+        ? ' The antenna-select signal did not reach the trigger pin: use "Software, with TX delay".'
+        : '';
+      throw Error(`Reference transmitter: ${e.message}.${hint}`);
     }
   }
 
@@ -935,6 +940,7 @@
   }
   $('capture').addEventListener('click', captureOnce);
   $('sniff').addEventListener('click', findDevices);
+  $('ref-trigger').addEventListener('change', updateButtons);
   $('run').addEventListener('click', () => {
     if (running) running = false;
     else runLoop();

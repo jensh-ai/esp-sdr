@@ -109,10 +109,13 @@ Steps 1 to 4 are the same; step 5 changes:
    over 40 µs is already one radian). So the residual offset is taken from the
    phase drift of A·B* within each burst, alternating with the time offset
    until both settle.
-3. **Phase per burst:** B is aligned to a fraction of a sample, and A·B* is
+3. **Time offset from the bursts:** the fractional lag that maximizes
+   |Σ A·B*| over the bursts, alternating with step 2. A 30 µs burst in a 1 ms
+   snapshot (16 MS/s) hardly influences the estimate over the whole snapshot.
+4. **Phase per burst:** B is aligned to a fraction of a sample, and A·B* is
    summed over the burst. Δφ = φ(target burst) − φ(reference burst). Both
    bursts share the channel, so a residual time offset changes both phases
-   alike and cancels; no wideband delay measurement is needed.
+   alike and cancels.
 
 *Reference burst #* and *Target burst #* select the bursts (default 1 and 2).
 
@@ -184,11 +187,13 @@ reference signal into every snapshot (`REFTX` in
    reply. With the MAC of a Wi-Fi device, that device answers with an ACK
    10 µs after the frame: reference and target are then always in the same
    snapshot, without flooding the channel (one short frame per capture).
-4. *TX delay after trigger* sets when the frame is handed to the Wi-Fi driver,
-   relative to the trigger edge; the driver adds a varying wait for a free
-   channel. Adjust it so that the frame and the ACK appear in the *Envelope*
-   plot inside the snapshot. *Reference TX* shows whether the ACK arrived and
-   the driver's timing.
+4. *Trigger edge*: with *TX start (hardware)* (default) the radio's
+   antenna-select signal raises the line exactly when the frame starts, so
+   the frame opens the snapshot and its ACK follows about 40 µs later.
+   *Software, with TX delay* raises the line in software; the frame then
+   leaves several hundred µs after it is handed to the driver (about 760 µs
+   measured), so use a negative *TX delay* or 16 MS/s. *Reference TX* shows
+   whether the ACK arrived and the timing relative to the edge.
 5. Keep the TX power low (2 dBm) and the transmitter some distance away, so
    that the receivers do not clip.
 

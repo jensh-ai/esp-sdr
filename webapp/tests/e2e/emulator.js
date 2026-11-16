@@ -41,7 +41,7 @@
   function makeBursts(n, delayUs, ack) {
     const len = n + 8, src = { ref: [new Float32Array(len), new Float32Array(len)], tgt: [new Float32Array(len), new Float32Array(len)] };
     const g = () => Math.sqrt(-2 * Math.log(Math.random() || 1e-9)) * Math.cos(2 * Math.PI * Math.random());
-    const s0 = Math.round((20 + Math.max(0, delayUs)) * 80), L = 30 * 80, gap = 10 * 80;
+    const s0 = Math.round((20 + delayUs) * 80), L = 30 * 80, gap = 10 * 80;
     for (let j = s0; j < Math.min(len, s0 + L); j++) { src.ref[0][j] = 0.25 * g(); src.ref[1][j] = 0.25 * g(); }
     if (ack) for (let j = s0 + L + gap; j < Math.min(len, s0 + 2 * L + gap); j++) { src.tgt[0][j] = 0.1 * g(); src.tgt[1][j] = 0.1 * g(); }
     return src;
@@ -124,10 +124,12 @@
         }, Math.min(+m[2], 200));
         return;
       }
-      if ((m = /^REFTX (\d+) (-?\d+) (\d+) (\d+) (\d+) ([NP]) ((?:[0-9A-F]{2}:){5}[0-9A-F]{2})$/.exec(line))) {
+      if ((m = /^REFTX (\d+) ([HS]) (-?\d+) (\d+) (\d+) (\d+) ([NP]) ((?:[0-9A-F]{2}:){5}[0-9A-F]{2})$/.exec(line))) {
         // Both receivers listen; this board raises the line and sends a frame
-        // that the target acknowledges (unless broadcast).
-        const delay = +m[2], broadcast = m[7] === 'FF:FF:FF:FF:FF:FF';
+        // that the target acknowledges (unless broadcast). Hardware edge: the
+        // frame starts the snapshot; software: about 760 us driver latency.
+        const hw = m[2] === 'H', broadcast = m[8] === 'FF:FF:FF:FF:FF:FF';
+        const delay = hw ? -20 : +m[3] + 760 - 20;
         shared.lastReftx = line;
         const slaves = shared.wireConnected ? shared.pendingSlaves.splice(0) : [];
         for (const x of slaves) clearTimeout(x.timer);
@@ -141,7 +143,7 @@
             sendCapture(x.dev, n, burstPayload(src, n, isA ? 3 : 0, isA ? 0 : 0.5, isA ? 0 : 20e3, isA ? 0 : 0.6 + 0.05 * (Math.random() - 0.5)), 1234);
           }
         }
-        return this.send(`REFTX 1 ${delay} ${delay + 70}\n`);
+        return this.send(hw ? 'REFTX 1 -760 70\n' : `REFTX 1 ${+m[3]} ${+m[3] + 830}\n`);
       }
       this.send('ERR command\n');
     }

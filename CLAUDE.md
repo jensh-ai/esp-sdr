@@ -69,7 +69,7 @@ enthalten nur Rauschen (RMS ~3–4 LSB bei Gain 40) und gehen nicht in die Mitte
 
 ## Firmware-Erweiterung: `REFTX` (optionaler Referenzsender, nur C3)
 
-`REFTX <pin> <delay_us> <channel> <mbps> <power/0.25dBm> <N|P> <mac>` → treibt
+`REFTX <pin> <H|S> <delay_us> <channel> <mbps> <power/0.25dBm> <N|P> <mac>` → treibt
 die Triggerleitung (A und B beide `TCAP … S`), sendet einen 802.11-Frame per
 `esp_wifi_80211_tx` (Null-Data oder Probe Request; vorher Wi-Fi NULL → STA,
 Rate nur bei gestopptem Wi-Fi setzbar), Antwort `REFTX <acked> <queued_us>
@@ -82,7 +82,14 @@ SNIFF-Treffer, weil `prepare_rx` PBUS-Zeilen (0/1, 1/1, 1/2, 4/1, 5/1 via
 setzt, die ein Wi-Fi-Neustart nicht zurücksetzt. Seitdem `rf_mode_save()`
 (beim ersten `prepare_rx` nach dem Boot) und `rf_mode_restore()` vor
 REFTX/SNIFF, dazu AGC freigeben und Kanal per Umweg neu setzen (`wifi_tune`).
-Wirkung auf Hardware noch ungeprüft.
+Danach (2026-11-16) sendet REFTX auf Hardware, aber der Frame kommt ~760 µs
+nach `esp_wifi_80211_tx` (queued 2 µs, done 903 µs). Deshalb Modus `H`:
+Antennen-Select-Signal (`esp_phy_set_ant_gpio`/`esp_phy_set_ant`, TX-Antenne 1,
+RX-Antenne 0) direkt auf den Triggerpin, GPIO-Interrupt hält die Leitung
+danach als normaler Ausgang hoch. `S` = alter Software-Modus mit Delay.
+Modus H auf Hardware noch ungeprüft. DSP: im Burst-Modus kommt der Lag jetzt
+aus den Bursts (`burstLag`, Maximum von |Σ A·B*|), sonst lag er bei 16 MS/s
+mit einem 31-µs-Burst 0,5 Sample daneben und die CFO-Verfeinerung kippte.
 
 `SNIFF <channel> <ms>` (nur C3): Wi-Fi-Neustart mit AGC, Promiscuous
 (MGMT+DATA), Tabelle max. 48 Sender → `STA <mac> <frames> <rssi_avg>

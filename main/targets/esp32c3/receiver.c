@@ -6,6 +6,12 @@
 #include "driver/usb_serial_jtag.h"
 #include "esp_attr.h"
 #include "esp_event.h"
+#include "esp_phy.h"
+#include "driver/gpio.h"
+#include "esp_rom_gpio.h"
+#include "soc/gpio_periph.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/io_mux_reg.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_timer.h"
@@ -303,13 +309,17 @@ static bool triggered_capture_command(const char *line) {
     return true;
 }
 
-/* REFTX <pin> <delay_us> <channel> <mbps> <power> <N|P> <mac>: optional
+/* REFTX <pin> <H|S> <delay_us> <channel> <mbps> <power> <N|P> <mac>: optional
  * reference transmitter. It drives the shared trigger line (both receivers
- * listen with TCAP ... S) and sends one 802.11 frame at <delay_us> from the
- * trigger edge (negative: the frame is queued first). The frame is the
+ * listen with TCAP ... S) and sends one 802.11 frame. The frame is the
  * reference signal in both snapshots. Addressed to another station, it makes
  * that station answer with an ACK one SIFS (10 us) after the frame, so a
  * reference and a target transmission share every snapshot.
+ * H: the trigger edge is the start of the transmission. The radio's antenna
+ *    select signal is routed to the pin (antenna 1 for TX, antenna 0 for RX),
+ *    and an interrupt then latches the line high. <delay_us> is ignored.
+ * S: software timing; the frame is handed to the driver <delay_us> after the
+ *    edge (negative: first). The driver takes several hundred microseconds.
  * <power> is in 0.25 dBm (8..84), <N|P> selects a null-data frame or a probe
  * request, <mac> FF:FF:FF:FF:FF:FF sends a broadcast (no ACK).
  * Replies REFTX <acked> <queued_us> <done_us>, times relative to the edge;
@@ -384,14 +394,43 @@ static int reftx_frame(uint8_t *f, char type, const uint8_t *to) {
     return 24 + (int)sizeof(body);
 }
 
+static volatile int64_t reftx_edge_at;
+static unsigned reftx_pin;
+/* Rising edge of the antenna select signal: keep the line high as a plain
+ * GPIO output, so that the receivers cannot miss a short frame. */
+static void IRAM_ATTR reftx_edge(void *arg) {
+    (void)arg;
+    if (reftx_edge_at) return;
+    reftx_edge_at = esp_timer_get_time();
+    REG_WRITE(GPIO_OUT_W1TS_REG, 1u << reftx_pin);
+    esp_rom_gpio_connect_out_signal(reftx_pin, SIG_GPIO_OUT_IDX, false, false);
+}
+
+/* Antenna 1 (pin high) while transmitting, antenna 0 (low) otherwise. The PHY
+ * keeps separate TX and RX antenna patterns and switches the pin itself. */
+static bool reftx_antenna(unsigned pin, bool on) {
+    esp_phy_ant_gpio_config_t gpio = {0};
+    esp_phy_ant_config_t ant = {.rx_ant_mode = ESP_PHY_ANT_MODE_ANT0,
+                                .rx_ant_default = ESP_PHY_ANT_ANT0,
+                                .tx_ant_mode = on ? ESP_PHY_ANT_MODE_ANT1 : ESP_PHY_ANT_MODE_ANT0,
+                                .enabled_ant0 = 0,
+                                .enabled_ant1 = on ? 1 : 0};
+    if (on) {
+        gpio.gpio_cfg[0].gpio_select = 1;
+        gpio.gpio_cfg[0].gpio_num = pin;
+        if (esp_phy_set_ant_gpio(&gpio) != ESP_OK) return false;
+    }
+    return esp_phy_set_ant(&ant) == ESP_OK;
+}
+
 static bool reftx_command(const char *line) {
     unsigned pin, channel, mbps, power, m[6];
     int delay;
-    char type, extra;
+    char mode, type, extra;
     if (strncmp(line, "REFTX ", 6)) return false;
-    if (sscanf(line, "REFTX %u %d %u %u %u %c %x:%x:%x:%x:%x:%x %c", &pin, &delay, &channel, &mbps, &power, &type,
-               &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &extra) != 12 ||
-        channel < 1 || channel > 13 || delay < -5000 || delay > 5000 || power < 8 || power > 84 ||
+    if (sscanf(line, "REFTX %u %c %d %u %u %u %c %x:%x:%x:%x:%x:%x %c", &pin, &mode, &delay, &channel, &mbps, &power,
+               &type, &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &extra) != 13 ||
+        (mode != 'H' && mode != 'S') || channel < 1 || channel > 13 || delay < -5000 || delay > 5000 || power < 8 || power > 84 ||
         (type != 'N' && type != 'P') || (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]) > 255) {
         reply("ERR reftx_args\n");
         return true;
@@ -423,14 +462,47 @@ static bool reftx_command(const char *line) {
     (void)xSemaphoreTake(reftx_sem, 0);
     reftx_done_at = 0;
     const uint32_t mask = 1u << pin;
-    int64_t edge, queued;
+    int64_t edge = 0, queued;
     esp_err_t err;
-    if (delay >= 0) {
+    bool done;
+    if (mode == 'H') {
+        static bool isr_service;
+        if (!isr_service) {
+            esp_err_t e = gpio_install_isr_service(0);
+            isr_service = e == ESP_OK || e == ESP_ERR_INVALID_STATE; /* already installed */
+        }
+        reftx_pin = pin;
+        reftx_edge_at = 0;
+        if (!isr_service || !reftx_antenna(pin, true)) {
+            (void)reftx_antenna(pin, false);
+            (void)burst_gpio_trigger_pin(pin, false);
+            reply("ERR reftx_antenna\n");
+            return true;
+        }
+        PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[pin]);
+        (void)gpio_set_intr_type(pin, GPIO_INTR_POSEDGE);
+        (void)gpio_isr_handler_add(pin, reftx_edge, NULL);
+        (void)gpio_intr_enable(pin);
+        queued = esp_timer_get_time();
+        err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
+        done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
+        edge = reftx_edge_at;
+        (void)gpio_intr_disable(pin);
+        (void)gpio_isr_handler_remove(pin);
+        (void)reftx_antenna(pin, false);
+        if (!edge) {
+            /* No transmission was seen on the pin: nothing to hold. */
+            (void)burst_gpio_trigger_pin(pin, false);
+            reply(err != ESP_OK ? "ERR reftx_send\n" : "ERR reftx_no_edge\n");
+            return true;
+        }
+    } else if (delay >= 0) {
         edge = esp_timer_get_time();
         REG_WRITE(GPIO_OUT_W1TS_REG, mask);
         esp_rom_delay_us((uint32_t)delay);
         queued = esp_timer_get_time();
         err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
+        done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
     } else {
         /* The Wi-Fi task has the higher priority and hands the frame to the
          * MAC while this task waits. */
@@ -439,8 +511,8 @@ static bool reftx_command(const char *line) {
         esp_rom_delay_us((uint32_t)-delay);
         edge = esp_timer_get_time();
         REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+        done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
     }
-    bool done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
     /* Hold the line until both receivers have certainly seen it. */
     int64_t hold = edge + 2000 - esp_timer_get_time();
     if (hold > 0) esp_rom_delay_us((uint32_t)hold);

@@ -91,7 +91,6 @@ const server = http.createServer((req, res) => {
       await page.selectOption('#trigger-mode', 'reftx');
       check((await page.inputValue('#analysis-mode')) === 'bursts', 'reftx: analysis switches to bursts');
       await page.fill('#ref-mac', '02:00:5e:10:00:01');
-      await page.fill('#ref-delay', '15');
       await page.click('#run');
       await page.waitForFunction(() => parseInt(document.getElementById('m-count').textContent) >= 25, null, { timeout: 60000 });
       await page.click('#run');
@@ -102,10 +101,19 @@ const server = http.createServer((req, res) => {
       check((await page.textContent('#m-bursts')).split(',').length === 2, `reftx: two bursts (${await page.textContent('#m-bursts')})`);
       check((await page.textContent('#warnings')) === '', `reftx: no warnings ${await page.textContent('#warnings')}`);
       check(
-        (await page.evaluate(() => window.__emu.lastReftx)) === 'REFTX 4 15 7 24 8 N 02:00:5E:10:00:01',
+        (await page.evaluate(() => window.__emu.lastReftx)) === 'REFTX 4 H 0 7 24 8 N 02:00:5E:10:00:01',
         'reftx: command carries the settings',
       );
       if (shots) await page.screenshot({ path: path.join(shots, 'webapp-reference-tx.png'), fullPage: true });
+      check(await page.isDisabled('#ref-delay'), 'reftx: TX delay unused with the hardware edge');
+      check(parseFloat(await page.textContent('#m-bursts')) < 2, `reftx: frame starts the snapshot (${await page.textContent('#m-bursts')})`);
+      await page.selectOption('#ref-trigger', 'S');
+      await page.fill('#ref-delay', '-700');
+      await page.click('#capture');
+      await page.waitForFunction(() => document.getElementById('message').textContent.startsWith('Captured'), null, { timeout: 15000 });
+      check((await page.evaluate(() => window.__emu.lastReftx)).startsWith('REFTX 4 S -700 '), 'reftx: software edge with negative delay');
+      check(Math.abs(parseFloat(await page.textContent('#m-bursts')) - 60) < 3, `reftx: software delay moves the frame (${await page.textContent('#m-bursts')})`);
+      await page.selectOption('#ref-trigger', 'H');
       await page.fill('#ref-mac', '');
       await page.click('#capture');
       await page.waitForFunction(() => document.getElementById('message').textContent.startsWith('Captured'), null, { timeout: 15000 });
