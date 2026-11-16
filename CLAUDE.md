@@ -94,7 +94,12 @@ vor dessen Rückkehr (Burst am Anfang abgeschnitten). Seitdem negatives Delay
 per gptimer-Alarm-ISR (`reftx_timer_arm`), Default −700 µs. SNIFF fand nie
 etwas: zusätzlich Promiscuous explizit aus/an, `0x60033d90` (Dump-Routing,
 von jedem Capture gesetzt) in `rf_mode_save/restore`, END meldet jetzt auch
-die Zahl aller Pakete (0 = RX-Pfad tot). Beides auf Hardware ungeprüft. DSP: im Burst-Modus kommt der Lag jetzt
+die Zahl aller Pakete (0 = RX-Pfad tot). Beides auf Hardware ungeprüft.
+**Erster Erfolg (2026-11-16, fw a5bfdb9, S/−1 µs, 6 Mbps, Router-MAC, Kanal 1):**
+Referenz-Frame 0–55 µs (Anfang abgeschnitten), Router-ACK 72–116 µs
+(Lücke ~16 µs = SIFS 10 µs + 6 µs ERP-OFDM Signal Extension), Kohärenz
+Ref/Ziel 0,82/0,99, CFO −24,7 kHz, Lag 1,3 Samples. ACK ~26 dB stärker als
+die Referenz (2 dBm), A clippt im ACK leicht (0,6 %). DSP: im Burst-Modus kommt der Lag jetzt
 aus den Bursts (`burstLag`, Maximum von |Σ A·B*|), sonst lag er bei 16 MS/s
 mit einem 31-µs-Burst 0,5 Sample daneben und die CFO-Verfeinerung kippte.
 
