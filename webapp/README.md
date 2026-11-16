@@ -213,7 +213,11 @@ the address into *Target MAC*. Notes:
   *random*. They acknowledge only the address they use right now, which is
   the one in this list.
 - Idle phones sleep most of the time and miss frames. Access points are always
-  awake, and devices with traffic (many frames) answer reliably.
+  awake, and devices with traffic (many frames) answer reliably. Measured: a
+  router acknowledged every frame, a phone only now and then even while
+  playing a video (it fetches in chunks and sleeps in between); continuous
+  traffic such as a ping flood or a speed test keeps it awake. Pairs without
+  an ACK have no target burst and are left out of the average.
 
 <img src="../docs/webapp-device-list.png" alt="Device list with an access point, a station with a random address and a device sending only management frames" width="640">
 

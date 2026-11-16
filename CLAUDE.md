@@ -161,6 +161,11 @@ Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
   ~10 µs vollständig, ACK 16 µs danach; Referenz nur 13–16 dB über Rauschen,
   Router-ACK 25–31 dB. Nutzer: „manchmal sieht nur ein ESP die Referenz“ –
   Ursache offen (Verdacht: knappe Referenz + Mehrwege-Schwund).
+- Hardware 2026-11-16 (Nutzer): Timer-Trigger-Jitter ~30 µs (reicht für Ref+ACK
+  im Fenster). Router-ACK zuverlässig, Smartphone nur gelegentlich (Power Save,
+  auch mit YouTube-Traffic). Layout: Warnzeile, Statuszeile, Metrik-Kacheln
+  und Bildunterschriften haben feste Höhen, damit die Plots im Dauerlauf
+  nicht springen (E2E prüft das).
 - Hosting: `.github/workflows/pages.yml` veröffentlicht `webapp/` aus `main`
   (Settings → Pages → Source: GitHub Actions, vom Nutzer noch zu aktivieren).
   Lokal: `cd webapp && python3 -m http.server 8000`.

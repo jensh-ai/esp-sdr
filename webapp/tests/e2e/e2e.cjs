@@ -101,6 +101,8 @@ const server = http.createServer((req, res) => {
       check((await page.textContent('#m-bursts')).split(',').length === 2, `reftx: two bursts (${await page.textContent('#m-bursts')})`);
       check((await page.textContent('#warnings')) === '', `reftx: no warnings ${await page.textContent('#warnings')}`);
       check((await page.textContent('#caption-phase')).includes('per burst'), 'reftx: phase plot per burst');
+      const layout = () => page.evaluate(() => document.getElementById('plot-history').getBoundingClientRect().top);
+      const before = await layout();
       check(
         (await page.evaluate(() => window.__emu.lastReftx)) === 'REFTX 4 S -700 7 24 8 N 02:00:5E:10:00:01',
         'reftx: command carries the settings',
@@ -118,6 +120,7 @@ const server = http.createServer((req, res) => {
       await page.click('#capture');
       await page.waitForFunction(() => document.getElementById('message').textContent.startsWith('Captured'), null, { timeout: 15000 });
       check((await page.textContent('#warnings')).includes('Only 1 burst'), 'reftx: broadcast gives one burst');
+      check((await layout()) === before, 'layout: plots stay in place when warnings appear');
       await page.fill('#ref-delay', '-650');
       await page.dispatchEvent('#ref-delay', 'change');
       const [download] = await Promise.all([page.waitForEvent('download'), page.click('#export')]);

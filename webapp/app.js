@@ -897,8 +897,8 @@
             im = target.im[i] * ref.re[i] - target.re[i] * ref.im[i];
           return DualDSP.wrap(Math.atan2(im, re) - calibration) * DEG;
         });
-      caption.textContent =
-        'Cross-spectrum phase per burst: reference (green), target (purple) and Δφ = target − reference (blue, should be flat)';
+      caption.textContent = 'Phase per burst: reference (green), target (purple), Δφ = target − ref (blue, flat)';
+      caption.title = 'Cross-spectrum phase per burst. Δφ(f) should be flat at the Δφ metric.';
       plot($('plot-phase'), {
         series: [
           { x: f, y: phase(ref), color: css('--series-ref'), points: true, alpha: alpha(ref) },
@@ -912,6 +912,7 @@
       return;
     }
     caption.textContent = 'Cross-spectrum phase after delay removal (coherent bins highlighted)';
+    caption.title = '';
     const f = Array.from(r.cs.freq, (x) => x / 1e6),
       phase = Array.from(r.cs.re, (re, i) => Math.atan2(r.cs.im[i], re) * DEG),
       alpha = Array.from(r.cs.coherence, (g) => (g >= 0.5 ? 1 : 0.12));
