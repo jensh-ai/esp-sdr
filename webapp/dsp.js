@@ -623,7 +623,9 @@
     fft(xr, xi);
     fft(yr, yi);
     const re = new Float64Array(N),
-      im = new Float64Array(N);
+      im = new Float64Array(N),
+      paa = new Float64Array(N),
+      pbb = new Float64Array(N);
     let pa = 0,
       pb = 0;
     for (let i = 0; i < N; i++) {
@@ -634,10 +636,12 @@
         ci = xi[i] * yr[i] - xr[i] * yi[i];
       re[i] = cr * c - ci * s;
       im[i] = cr * s + ci * c;
-      pa += xr[i] * xr[i] + xi[i] * xi[i];
-      pb += yr[i] * yr[i] + yi[i] * yi[i];
+      paa[i] = xr[i] * xr[i] + xi[i] * xi[i];
+      pbb[i] = yr[i] * yr[i] + yi[i] * yi[i];
+      pa += paa[i];
+      pb += pbb[i];
     }
-    return { re, im, pa, pb, N };
+    return { re, im, paa, pbb, pa, pb, N };
   }
 
   // Phase of A·B* over one burst. For two bursts on the same channel, a
@@ -715,6 +719,34 @@
     return (lo + hi) / 2;
   }
 
+  // Cross spectrum of one burst in `groups` frequency groups from -fs/2 to
+  // fs/2 (summed A·B*, its phase and the coherence within the group).
+  function burstSpectrum(a, b, k, burst, fs, groups = 128) {
+    const x = burstCross(a, b, k, burst);
+    if (!x) return null;
+    const g = Math.min(groups, x.N),
+      per = x.N / g,
+      out = { freq: new Float64Array(g), re: new Float64Array(g), im: new Float64Array(g), coherence: new Float64Array(g) };
+    for (let j = 0; j < g; j++) {
+      let re = 0,
+        im = 0,
+        pa = 0,
+        pb = 0;
+      for (let q = 0; q < per; q++) {
+        const i = (j * per + q + x.N / 2) % x.N; // -fs/2 .. fs/2
+        re += x.re[i];
+        im += x.im[i];
+        pa += x.paa[i];
+        pb += x.pbb[i];
+      }
+      out.freq[j] = ((j + 0.5) / g - 0.5) * fs;
+      out.re[j] = re;
+      out.im[j] = im;
+      out.coherence[j] = pa && pb ? (re * re + im * im) / (pa * pb) : 0;
+    }
+    return out;
+  }
+
   // Level of each burst in each receiver, in dB over that receiver's noise
   // (mean power outside all bursts): snrA, snrB. b aligned by the lag k.
   function burstLevels(a, b, k, bursts) {
@@ -773,7 +805,10 @@
       cs = next;
       if (done) break;
     }
-    let ref, target, bursts = null;
+    let ref,
+      target,
+      bursts = null,
+      burstSpectra = null;
     if (opt.mode === 'bursts') {
       // Reference and target are transmissions at different times.
       bursts = findBursts(a, b, cs.lag, fs, { thresholdDb: opt.burstThresholdDb ?? 10 });
@@ -811,13 +846,17 @@
       const pick = (i) => (bursts[i] ? burstPhase(a, bAligned, k, bursts[i]) : { phase: NaN, coherence: 0 });
       ref = pick((opt.refBurst ?? 1) - 1);
       target = pick((opt.targetBurst ?? 2) - 1);
+      // Per-burst cross spectra for display; their product target·ref* is
+      // Δφ over frequency and should be flat.
+      const spec = (i) => (bursts[i] ? burstSpectrum(a, bAligned, k, bursts[i], fs) : null);
+      burstSpectra = { ref: spec((opt.refBurst ?? 1) - 1), target: spec((opt.targetBurst ?? 2) - 1) };
     } else {
       ref = bandPhase(cs, opt.refHz ?? 0, opt.refWidthHz ?? fs);
       target = bandPhase(cs, opt.targetHz ?? 0, opt.targetWidthHz ?? fs);
     }
     const dphi = wrap(target.phase - ref.phase - (opt.calibration ?? 0));
     const angle = opt.baselineM ? angleFromPhase(dphi, targetFrequency(opt), opt.baselineM) : NaN;
-    return { cfo, xc, cs, ref, target, bursts, dphi, angle, a, b };
+    return { cfo, xc, cs, ref, target, bursts, burstSpectra, dphi, angle, a, b };
   }
 
   // Envelope |x|^2 reduced to `points` maxima for display.
@@ -851,6 +890,7 @@
     burstPhase,
     burstLag,
     burstLevels,
+    burstSpectrum,
     burstCfo,
     fracDelay,
     targetFrequency,

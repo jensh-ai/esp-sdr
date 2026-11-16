@@ -100,6 +100,7 @@ const server = http.createServer((req, res) => {
       check((await page.textContent('#m-ref')).includes('ACK received'), 'reftx: ACK reported');
       check((await page.textContent('#m-bursts')).split(',').length === 2, `reftx: two bursts (${await page.textContent('#m-bursts')})`);
       check((await page.textContent('#warnings')) === '', `reftx: no warnings ${await page.textContent('#warnings')}`);
+      check((await page.textContent('#caption-phase')).includes('per burst'), 'reftx: phase plot per burst');
       check(
         (await page.evaluate(() => window.__emu.lastReftx)) === 'REFTX 4 S -700 7 24 8 N 02:00:5E:10:00:01',
         'reftx: command carries the settings',

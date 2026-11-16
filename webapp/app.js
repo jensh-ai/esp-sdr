@@ -795,7 +795,8 @@
         for (let i = 0; i < s.x.length; i++) {
           if (!Number.isFinite(s.y[i])) continue;
           g.globalAlpha = s.alpha ? s.alpha[i] : 1;
-          g.fillRect(X(s.x[i]) - 1.5, Y(s.y[i]) - 1.5, 3, 3);
+          const d = s.size || 3;
+          g.fillRect(X(s.x[i]) - d / 2, Y(s.y[i]) - d / 2, d, d);
         }
         g.globalAlpha = 1;
       } else {
@@ -881,6 +882,36 @@
   }
 
   function drawPhase(r, opt) {
+    const caption = $('caption-phase');
+    if (r.burstSpectra?.ref && r.burstSpectra?.target) {
+      // Per burst: reference and target phase over frequency, and their
+      // difference Δφ(f) (calibration removed), which should be flat at Δφ.
+      const { ref, target } = r.burstSpectra,
+        f = Array.from(ref.freq, (x) => x / 1e6),
+        ok = (sp, i) => sp.coherence[i] >= 0.5,
+        phase = (sp) => Array.from(sp.re, (re, i) => Math.atan2(sp.im[i], re) * DEG),
+        alpha = (sp) => Array.from(sp.coherence, (c) => (c >= 0.5 ? 1 : 0.12)),
+        diff = Array.from(ref.re, (_, i) => {
+          if (!ok(ref, i) || !ok(target, i)) return NaN;
+          const re = target.re[i] * ref.re[i] + target.im[i] * ref.im[i],
+            im = target.im[i] * ref.re[i] - target.re[i] * ref.im[i];
+          return DualDSP.wrap(Math.atan2(im, re) - calibration) * DEG;
+        });
+      caption.textContent =
+        'Cross-spectrum phase per burst: reference (green), target (purple) and Δφ = target − reference (blue, should be flat)';
+      plot($('plot-phase'), {
+        series: [
+          { x: f, y: phase(ref), color: css('--series-ref'), points: true, alpha: alpha(ref) },
+          { x: f, y: phase(target), color: css('--series-target'), points: true, alpha: alpha(target) },
+          { x: f, y: diff, color: css('--accent'), points: true, size: 5 },
+        ],
+        xLabel: 'Offset from center (MHz)',
+        yLabel: 'phase (°)',
+        yRange: [-180, 180],
+      });
+      return;
+    }
+    caption.textContent = 'Cross-spectrum phase after delay removal (coherent bins highlighted)';
     const f = Array.from(r.cs.freq, (x) => x / 1e6),
       phase = Array.from(r.cs.re, (re, i) => Math.atan2(r.cs.im[i], re) * DEG),
       alpha = Array.from(r.cs.coherence, (g) => (g >= 0.5 ? 1 : 0.12));

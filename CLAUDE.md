@@ -152,7 +152,11 @@ Takt-Spurs, für Sync und Referenz ungeeignet (nicht ins Referenzband legen).
 - Export/Import eines Paars als JSON (Python-Snippet in `webapp/README.md`),
   inkl. `ui` = alle Panel-Eingaben nach id (+ Kalibrierung); dieselben Werte
   bleiben in `localStorage` (`dual-sdr.settings`). Burst-Metrik zeigt Pegel
-  je Empfänger über Rauschen (`burstLevels`), Warnung < 10 dB.
+  je Empfänger über Rauschen (`burstLevels`), Warnung < 10 dB. Phasenplot im
+  Burst-Modus: Kreuzspektrum je Burst (`burstSpectrum`, 128 Gruppen) für
+  Referenz/Ziel plus Δφ(f) = Ziel·Ref* − Kalibrierung (soll flach sein). Echte
+  Messung (6 Mbps, Router-ACK): Δφ(f) von −11° bis +16° über ±8 MHz, also
+  leichte Steigung (unterschiedlicher Laufzeitversatz Ref/Ziel, Mehrwege).
 - Hardware 2026-11-16 (fw a5bfdb9, Timer −760 µs, 24/6 Mbps, 2 dBm): Frame ab
   ~10 µs vollständig, ACK 16 µs danach; Referenz nur 13–16 dB über Rauschen,
   Router-ACK 25–31 dB. Nutzer: „manchmal sieht nur ein ESP die Referenz“ –

@@ -35,6 +35,7 @@ How to read the plots:
 | Envelope | Signal power over the snapshot; bursts should line up in both receivers |
 | Cross-correlation | Peak at the time offset between the snapshots; no clear peak means no common signal |
 | Cross-spectrum phase | Phase of A·B* per frequency after removing the time offset; coherent bins are highlighted. A flat line means the time offset is removed; a step between the bands is the measured Δφ |
+| Cross-spectrum phase (bursts mode) | Per burst: reference (green) and target (purple) phase over frequency, and Δφ(f) = target − reference after calibration (blue). The random LO phase and a residual time offset move both bursts alike, so Δφ(f) should be flat at the Δφ metric; a slope means the reference and the target arrive with different time offsets (geometry, multipath) |
 | History | Δφ (blue) and angle (orange) per capture |
 
 ## How the analysis works
