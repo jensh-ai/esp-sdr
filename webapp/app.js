@@ -416,7 +416,7 @@
     } catch (e) {
       if (!r.failed) await r.synchronize().catch(() => {});
       const hint = /reftx_no_edge|reftx_antenna/.test(e.message)
-        ? ' The antenna-select signal did not reach the trigger pin: use "Software, with TX delay".'
+        ? ' The antenna-select signal did not reach the trigger pin: use "Timer, with TX delay".'
         : '';
       throw Error(`Reference transmitter: ${e.message}.${hint}`);
     }
@@ -445,7 +445,10 @@
               m = /^STA ((?:[0-9A-F]{2}:){5}[0-9A-F]{2}) (\d+) (-?\d+) (-?\d+) ([ADM]*) (\S+)$/.exec(line);
             if (m)
               out.push({ mac: m[1], frames: +m[2], rssiAvg: +m[3], rssiMax: +m[4], flags: m[5], bssid: m[6] === '-' ? null : m[6] });
-            else if (/^END /.test(line)) return { rows: out, total: Number(line.split(' ')[1]) };
+            else if (/^END /.test(line)) {
+              const f = line.split(' ');
+              return { rows: out, total: Number(f[1]), packets: f[3] === undefined ? null : Number(f[3]) };
+            }
             else throw Error(line);
           }
         } catch (e) {
@@ -454,7 +457,9 @@
         }
       });
       showDevices(rows.rows);
-      $('sniff-status').textContent = `${rows.rows.length} transmitters, ${rows.total} frames on channel ${channel}.`;
+      $('sniff-status').textContent =
+        `${rows.rows.length} transmitters, ${rows.total} frames on channel ${channel}` +
+        (rows.packets === null ? '.' : ` (${rows.packets} packets of any type received).`);
     } catch (e) {
       $('sniff-status').textContent = '';
       message(`Device list: ${e.message || e}`, true);

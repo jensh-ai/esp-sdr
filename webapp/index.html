@@ -128,11 +128,11 @@
           <label
             >Trigger edge
             <select id="ref-trigger">
-              <option value="H" selected>TX start (hardware)</option>
-              <option value="S">Software, with TX delay</option>
+              <option value="S" selected>Timer, with TX delay</option>
+              <option value="H">TX start (antenna select, experimental)</option>
             </select></label
           >
-          <label>TX delay after trigger (µs)<input id="ref-delay" type="number" value="0" min="-5000" max="5000" step="1" /></label>
+          <label>TX delay after trigger (µs)<input id="ref-delay" type="number" value="-700" min="-5000" max="5000" step="1" /></label>
           <label
             >Frame
             <select id="ref-frame">
@@ -176,10 +176,10 @@
         </div>
         <p class="hint">
           A third board drives the trigger line and sends one 802.11 frame per capture: the reference. Addressed to a
-          station (Target MAC), that station answers with an ACK 10 µs later: the target. <em>TX start</em>: the radio's
-          antenna-select signal raises the line when the frame starts, so the frame begins the snapshot. <em>Software</em>:
-          the frame is handed to the Wi-Fi driver <em>TX delay</em> after the edge (negative: before); the driver needs
-          several hundred µs. Only address your own devices.
+          station (Target MAC), that station answers with an ACK 10 µs later: the target. <em>TX delay</em> is the time
+          from the trigger edge to handing the frame to the Wi-Fi driver; negative values hand it over first and raise
+          the line from a timer interrupt. The driver needs about 730 µs until the frame starts, so −700 µs opens the
+          snapshot about 30 µs before the frame. Only address your own devices.
         </p>
       </section>
 

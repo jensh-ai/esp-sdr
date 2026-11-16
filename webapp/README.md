@@ -187,13 +187,15 @@ reference signal into every snapshot (`REFTX` in
    reply. With the MAC of a Wi-Fi device, that device answers with an ACK
    10 µs after the frame: reference and target are then always in the same
    snapshot, without flooding the channel (one short frame per capture).
-4. *Trigger edge*: with *TX start (hardware)* (default) the radio's
-   antenna-select signal raises the line exactly when the frame starts, so
-   the frame opens the snapshot and its ACK follows about 40 µs later.
-   *Software, with TX delay* raises the line in software; the frame then
-   leaves several hundred µs after it is handed to the driver (about 760 µs
-   measured), so use a negative *TX delay* or 16 MS/s. *Reference TX* shows
-   whether the ACK arrived and the timing relative to the edge.
+4. *Trigger edge*: with *Timer, with TX delay* (default), *TX delay* is the
+   time from the trigger edge to handing the frame to the Wi-Fi driver. The
+   driver call takes about 750 µs on the C3 (the Wi-Fi task prepares the
+   frame), and the frame starts about 730 µs after the hand-over. With a
+   negative delay the frame is handed over first and a timer interrupt raises
+   the line, so −700 µs (default) opens the snapshot about 30 µs before the
+   frame. Tune it with the *Envelope* plot; *Reference TX* shows the timing
+   relative to the edge. *TX start (antenna select, experimental)* routes the
+   radio's antenna-select signal to the trigger pin instead.
 5. Keep the TX power low (2 dBm) and the transmitter some distance away, so
    that the receivers do not clip.
 

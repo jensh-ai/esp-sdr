@@ -8,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_phy.h"
 #include "driver/gpio.h"
+#include "driver/gptimer.h"
 #include "esp_rom_gpio.h"
 #include "soc/gpio_periph.h"
 #include "soc/gpio_sig_map.h"
@@ -98,7 +99,7 @@ extern unsigned rom_pbus_rd(unsigned row, unsigned field);
 extern void rom_pbus_force_test(unsigned row, unsigned field, unsigned value);
 static const uint8_t rf_rows[][2] = {{0, 1}, {1, 1}, {1, 2}, {4, 1}, {5, 1}};
 static uint16_t rf_row_saved[sizeof(rf_rows) / sizeof(rf_rows[0])];
-static uint32_t rf_mode_saved[3];
+static uint32_t rf_mode_saved[4];
 static bool rf_saved;
 static void rf_mode_save(void) {
     if (rf_saved) return;
@@ -107,6 +108,7 @@ static void rf_mode_save(void) {
     rf_mode_saved[0] = REG_READ(0x60006104u) & 1u;           /* PBUS force/debug mode */
     rf_mode_saved[1] = REG_READ(0x6000610cu) & (1u << 27);   /* PBUS work mode */
     rf_mode_saved[2] = REG_READ(0x60006110u) & 0xc000u;      /* RX clock enable */
+    rf_mode_saved[3] = REG_READ(0x60033d90u);                /* baseband sample routing (dump) */
     rf_saved = true;
 }
 static void rf_mode_restore(void) {
@@ -116,6 +118,7 @@ static void rf_mode_restore(void) {
     REG_WRITE(0x60006104u, (REG_READ(0x60006104u) & ~1u) | rf_mode_saved[0]);
     REG_WRITE(0x6000610cu, (REG_READ(0x6000610cu) & ~(1u << 27)) | rf_mode_saved[1]);
     REG_WRITE(0x60006110u, (REG_READ(0x60006110u) & ~0xc000u) | rf_mode_saved[2]);
+    REG_WRITE(0x60033d90u, rf_mode_saved[3]);
 }
 
 static void prepare_rx(void) {
@@ -319,7 +322,10 @@ static bool triggered_capture_command(const char *line) {
  *    select signal is routed to the pin (antenna 1 for TX, antenna 0 for RX),
  *    and an interrupt then latches the line high. <delay_us> is ignored.
  * S: software timing; the frame is handed to the driver <delay_us> after the
- *    edge (negative: first). The driver takes several hundred microseconds.
+ *    edge. Negative: the frame is handed over first, and a timer interrupt
+ *    raises the line |delay_us| later. The driver call itself takes about
+ *    750 us (the Wi-Fi task prepares the frame), and the frame starts shortly
+ *    before it returns; the interrupt can interrupt that preparation.
  * <power> is in 0.25 dBm (8..84), <N|P> selects a null-data frame or a probe
  * request, <mac> FF:FF:FF:FF:FF:FF sends a broadcast (no ACK).
  * Replies REFTX <acked> <queued_us> <done_us>, times relative to the edge;
@@ -408,7 +414,41 @@ static void IRAM_ATTR reftx_edge(void *arg) {
 
 /* Antenna 1 (pin high) while transmitting, antenna 0 (low) otherwise. The PHY
  * keeps separate TX and RX antenna patterns and switches the pin itself. */
-static bool reftx_antenna(unsigned pin, bool on) {
+/* One-shot timer that raises the trigger line while the Wi-Fi task works. */
+static gptimer_handle_t reftx_timer;
+static bool IRAM_ATTR reftx_alarm(gptimer_handle_t timer, const gptimer_alarm_event_data_t *event, void *arg) {
+    (void)timer;
+    (void)event;
+    (void)arg;
+    if (!reftx_edge_at) {
+        REG_WRITE(GPIO_OUT_W1TS_REG, 1u << reftx_pin);
+        reftx_edge_at = esp_timer_get_time();
+    }
+    return false;
+}
+static esp_err_t reftx_timer_arm(uint32_t us) {
+    esp_err_t err = ESP_OK;
+    if (!reftx_timer) {
+        gptimer_config_t config = {
+            .clk_src = GPTIMER_CLK_SRC_DEFAULT, .direction = GPTIMER_COUNT_UP, .resolution_hz = 1000000};
+        gptimer_event_callbacks_t callbacks = {.on_alarm = reftx_alarm};
+        err = gptimer_new_timer(&config, &reftx_timer);
+        if (err == ESP_OK) err = gptimer_register_event_callbacks(reftx_timer, &callbacks, NULL);
+        if (err == ESP_OK) err = gptimer_enable(reftx_timer);
+        if (err != ESP_OK) {
+            if (reftx_timer) (void)gptimer_del_timer(reftx_timer);
+            reftx_timer = NULL;
+            return err;
+        }
+    }
+    gptimer_alarm_config_t alarm = {.alarm_count = us ? us : 1};
+    err = gptimer_set_raw_count(reftx_timer, 0);
+    if (err == ESP_OK) err = gptimer_set_alarm_action(reftx_timer, &alarm);
+    if (err == ESP_OK) err = gptimer_start(reftx_timer);
+    return err;
+}
+
+static esp_err_t reftx_antenna(unsigned pin, bool on) {
     esp_phy_ant_gpio_config_t gpio = {0};
     esp_phy_ant_config_t ant = {.rx_ant_mode = ESP_PHY_ANT_MODE_ANT0,
                                 .rx_ant_default = ESP_PHY_ANT_ANT0,
@@ -418,9 +458,10 @@ static bool reftx_antenna(unsigned pin, bool on) {
     if (on) {
         gpio.gpio_cfg[0].gpio_select = 1;
         gpio.gpio_cfg[0].gpio_num = pin;
-        if (esp_phy_set_ant_gpio(&gpio) != ESP_OK) return false;
+        esp_err_t err = esp_phy_set_ant_gpio(&gpio);
+        if (err != ESP_OK) return err;
     }
-    return esp_phy_set_ant(&ant) == ESP_OK;
+    return esp_phy_set_ant(&ant);
 }
 
 static bool reftx_command(const char *line) {
@@ -466,17 +507,21 @@ static bool reftx_command(const char *line) {
     esp_err_t err;
     bool done;
     if (mode == 'H') {
-        static bool isr_service;
-        if (!isr_service) {
-            esp_err_t e = gpio_install_isr_service(0);
-            isr_service = e == ESP_OK || e == ESP_ERR_INVALID_STATE; /* already installed */
+        static esp_err_t isr_service = ESP_FAIL;
+        if (isr_service != ESP_OK) {
+            isr_service = gpio_install_isr_service(0);
+            if (isr_service == ESP_ERR_INVALID_STATE) isr_service = ESP_OK; /* already installed */
         }
         reftx_pin = pin;
         reftx_edge_at = 0;
-        if (!isr_service || !reftx_antenna(pin, true)) {
+        esp_err_t ant = isr_service == ESP_OK ? reftx_antenna(pin, true) : ESP_OK;
+        if (isr_service != ESP_OK || ant != ESP_OK) {
+            char answer[48];
             (void)reftx_antenna(pin, false);
             (void)burst_gpio_trigger_pin(pin, false);
-            reply("ERR reftx_antenna\n");
+            snprintf(answer, sizeof(answer), "ERR reftx_antenna %s %d\n", isr_service != ESP_OK ? "isr" : "phy",
+                     (int)(isr_service != ESP_OK ? isr_service : ant));
+            reply(answer);
             return true;
         }
         PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[pin]);
@@ -504,14 +549,29 @@ static bool reftx_command(const char *line) {
         err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
         done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
     } else {
-        /* The Wi-Fi task has the higher priority and hands the frame to the
-         * MAC while this task waits. */
+        /* The driver call blocks while the higher-priority Wi-Fi task prepares
+         * the frame; only an interrupt can raise the line during that time. */
+        reftx_pin = pin;
+        reftx_edge_at = 0;
+        esp_err_t timer = reftx_timer_arm((uint32_t)-delay);
+        if (timer != ESP_OK) {
+            char answer[40];
+            (void)burst_gpio_trigger_pin(pin, false);
+            snprintf(answer, sizeof(answer), "ERR reftx_timer %d\n", (int)timer);
+            reply(answer);
+            return true;
+        }
         queued = esp_timer_get_time();
         err = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
-        esp_rom_delay_us((uint32_t)-delay);
-        edge = esp_timer_get_time();
-        REG_WRITE(GPIO_OUT_W1TS_REG, mask);
         done = err == ESP_OK && xSemaphoreTake(reftx_sem, pdMS_TO_TICKS(50)) == pdTRUE;
+        /* The alarm may still be pending when the driver was fast. */
+        while (!reftx_edge_at && esp_timer_get_time() < queued - delay + 2000) esp_rom_delay_us(10);
+        (void)gptimer_stop(reftx_timer);
+        if (!reftx_edge_at) {
+            REG_WRITE(GPIO_OUT_W1TS_REG, mask);
+            reftx_edge_at = esp_timer_get_time();
+        }
+        edge = reftx_edge_at;
     }
     /* Hold the line until both receivers have certainly seen it. */
     int64_t hold = edge + 2000 - esp_timer_get_time();
@@ -540,7 +600,8 @@ static bool reftx_command(const char *line) {
  *   STA <mac> <frames> <rssi_avg> <rssi_max> <flags> <bssid|->
  * flags: A = access point (beacon, probe response or from-DS data),
  * D = data frames, M = management frames; bssid is the access point a
- * station sent data to. Then END <frames> <addresses>. */
+ * station sent data to. Then END <frames> <addresses> <packets>, where
+ * packets counts everything received, control frames included. */
 #define SNIFF_MAX 48
 typedef struct {
     uint8_t mac[6], bssid[6];
@@ -551,12 +612,13 @@ typedef struct {
 } sniff_entry_t;
 static sniff_entry_t sniff_table[SNIFF_MAX];
 static unsigned sniff_count;
-static uint32_t sniff_frames;
+static uint32_t sniff_frames, sniff_packets;
 static portMUX_TYPE sniff_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void sniff_rx(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *pkt = buf;
     const uint8_t *f = pkt->payload;
+    sniff_packets++;
     if ((type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) || pkt->rx_ctrl.sig_len < 24) return;
     const uint8_t *from = f + 10;
     uint8_t subtype = f[0] >> 4, ds = f[1] & 3, flags = type == WIFI_PKT_DATA ? 2 : 4;
@@ -606,21 +668,24 @@ static bool sniff_command(const char *line) {
     (void)esp_wifi_stop();
     rf_mode_restore();
     rx_lo_select(false);
-    wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
+    wifi_promiscuous_filter_t filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
     if (esp_wifi_start() != ESP_OK || esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK ||
-        wifi_tune(channel) != ESP_OK || esp_wifi_set_promiscuous_filter(&filter) != ESP_OK || esp_wifi_set_promiscuous_rx_cb(sniff_rx) != ESP_OK) {
+        wifi_tune(channel) != ESP_OK || esp_wifi_set_promiscuous(false) != ESP_OK ||
+        esp_wifi_set_promiscuous_filter(&filter) != ESP_OK || esp_wifi_set_promiscuous_rx_cb(sniff_rx) != ESP_OK ||
+        esp_wifi_set_promiscuous(true) != ESP_OK) {
         reply("ERR sniff_wifi\n");
         return true;
     }
     taskENTER_CRITICAL(&sniff_mux);
     sniff_count = 0;
     sniff_frames = 0;
+    sniff_packets = 0;
     taskEXIT_CRITICAL(&sniff_mux);
     vTaskDelay(pdMS_TO_TICKS(ms));
     (void)esp_wifi_set_promiscuous_rx_cb(NULL);
     taskENTER_CRITICAL(&sniff_mux);
     unsigned count = sniff_count;
-    uint32_t frames = sniff_frames;
+    uint32_t frames = sniff_frames, packets = sniff_packets;
     taskEXIT_CRITICAL(&sniff_mux);
     /* Most frames first (the callback no longer writes the table). */
     for (unsigned j = 1; j < count; j++)
@@ -644,8 +709,8 @@ static bool sniff_command(const char *line) {
                  (int)(e->rssi_sum / (int32_t)e->frames), e->rssi_max, flags, bssid);
         reply(answer);
     }
-    char end[40];
-    snprintf(end, sizeof(end), "END %" PRIu32 " %u\n", frames, count);
+    char end[48];
+    snprintf(end, sizeof(end), "END %" PRIu32 " %u %" PRIu32 "\n", frames, count, packets);
     reply(end);
     return true;
 }

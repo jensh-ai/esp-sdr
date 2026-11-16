@@ -116,9 +116,12 @@ receivers wait with `TCAP… S`. When both report `ARMED`, the host sends
   latches it high as a plain GPIO output. `<delay-us>` is ignored. Without an
   edge the reply is `ERR reftx_no_edge`.
 - `S` (software): `<delay-us>` (−5000 to 5000) is the time from the edge to
-  handing the frame to the Wi-Fi driver; negative values queue the frame
-  first and raise the line `|delay-us|` later. On hardware the frame left
-  about 760 µs after the hand-over (driver and channel access), varying.
+  handing the frame to the Wi-Fi driver. Negative values hand it over first;
+  a timer interrupt raises the line `|delay-us|` later. On hardware the driver
+  call blocked for about 750 µs while the Wi-Fi task prepared the frame, and
+  the frame started about 730 µs after the call, so only an interrupt can
+  place the edge just before the frame (`-700` opens the snapshot about 30 µs
+  earlier). `ERR reftx_timer <code>` if the timer cannot be set up.
 
 - `<channel>` 1 to 13; `<mbps>` one of 1, 2, 5 (5.5), 11, 6, 9, 12, 18, 24,
   36, 48, 54; `<power>` in 0.25 dBm, 8 to 84 (2 to 21 dBm).
@@ -142,7 +145,7 @@ that it can receive the ACK, and retunes to the channel. The next capture on
 the board prepares the receiver again.
 
 Errors: `ERR reftx_args`, `ERR rate`, `ERR trigger_pin`, `ERR reftx_wifi`
-(Wi-Fi setup failed), `ERR reftx_antenna` (antenna-select setup failed),
+(Wi-Fi setup failed), `ERR reftx_antenna isr|phy <code>` (antenna-select setup failed),
 `ERR reftx_no_edge`, `ERR reftx_send [<code>]` (`esp_wifi_80211_tx` failed).
 
 Only address your own devices: every frame is a real transmission.
@@ -160,7 +163,9 @@ frames in promiscuous mode, and replies one line per transmitter address
 
 `flags`: `A` access point (beacon, probe response or from-DS data), `D` data
 frames, `M` management frames. `bssid` is the access point a station sent
-data to. Then `END <frames> <addresses>`. Errors: `ERR sniff_args`,
+data to. Then `END <frames> <addresses> <packets>`, where `packets` counts
+everything received (control frames included; 0 means the receive path does
+not work). Errors: `ERR sniff_args`,
 `ERR sniff_wifi`. The next capture on the board prepares the receiver again.
 
 The [S3 continuous stream](iq-stream.md) also sends `(I, -Q)` pairs.

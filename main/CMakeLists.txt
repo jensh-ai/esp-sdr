@@ -23,6 +23,10 @@ option(RING_PROBE "Build bounded experimental ring diagnostics (never package)" 
 if(IDF_TARGET STREQUAL "esp32c61" OR IDF_TARGET STREQUAL "esp32c6")
     list(APPEND sources "common/ring_capture.c")
 endif()
+if(IDF_TARGET STREQUAL "esp32c3")
+    # REFTX raises the trigger line from a timer interrupt.
+    list(APPEND dependencies esp_driver_gptimer)
+endif()
 if(IDF_TARGET STREQUAL "esp32c2")
     list(APPEND sources "${target_dir}/heap_guard.c")
 endif()

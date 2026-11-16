@@ -87,7 +87,14 @@ nach `esp_wifi_80211_tx` (queued 2 µs, done 903 µs). Deshalb Modus `H`:
 Antennen-Select-Signal (`esp_phy_set_ant_gpio`/`esp_phy_set_ant`, TX-Antenne 1,
 RX-Antenne 0) direkt auf den Triggerpin, GPIO-Interrupt hält die Leitung
 danach als normaler Ausgang hoch. `S` = alter Software-Modus mit Delay.
-Modus H auf Hardware noch ungeprüft. DSP: im Burst-Modus kommt der Lag jetzt
+Modus H lieferte auf Hardware `ERR reftx_antenna` (jetzt mit Schritt + Code).
+Messung mit S und Delay −1: `queued −753 µs` → der Treiberaufruf blockiert
+~750 µs (WLAN-Task bereitet vor), Frame startet ~730 µs nach dem Aufruf, also
+vor dessen Rückkehr (Burst am Anfang abgeschnitten). Seitdem negatives Delay
+per gptimer-Alarm-ISR (`reftx_timer_arm`), Default −700 µs. SNIFF fand nie
+etwas: zusätzlich Promiscuous explizit aus/an, `0x60033d90` (Dump-Routing,
+von jedem Capture gesetzt) in `rf_mode_save/restore`, END meldet jetzt auch
+die Zahl aller Pakete (0 = RX-Pfad tot). Beides auf Hardware ungeprüft. DSP: im Burst-Modus kommt der Lag jetzt
 aus den Bursts (`burstLag`, Maximum von |Σ A·B*|), sonst lag er bei 16 MS/s
 mit einem 31-µs-Burst 0,5 Sample daneben und die CFO-Verfeinerung kippte.
 

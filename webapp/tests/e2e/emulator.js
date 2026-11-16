@@ -120,16 +120,17 @@
           this.send('STA 3C:A6:2F:11:22:33 412 -41 -38 AM -\n');
           this.send('STA 5A:11:22:33:44:55 87 -55 -49 DM 3C:A6:2F:11:22:33\n');
           this.send('STA 24:0A:C4:00:00:07 12 -63 -60 M -\n');
-          this.send('END 511 3\n');
+          this.send('END 511 3 640\n');
         }, Math.min(+m[2], 200));
         return;
       }
       if ((m = /^REFTX (\d+) ([HS]) (-?\d+) (\d+) (\d+) (\d+) ([NP]) ((?:[0-9A-F]{2}:){5}[0-9A-F]{2})$/.exec(line))) {
         // Both receivers listen; this board raises the line and sends a frame
         // that the target acknowledges (unless broadcast). Hardware edge: the
-        // frame starts the snapshot; software: about 760 us driver latency.
+        // frame starts the snapshot; timer: the frame starts about 731 us after
+        // the driver call, which is <delay> after the edge.
         const hw = m[2] === 'H', broadcast = m[8] === 'FF:FF:FF:FF:FF:FF';
-        const delay = hw ? -20 : +m[3] + 760 - 20;
+        const delay = hw ? -20 : 711 + +m[3];
         shared.lastReftx = line;
         const slaves = shared.wireConnected ? shared.pendingSlaves.splice(0) : [];
         for (const x of slaves) clearTimeout(x.timer);
@@ -143,7 +144,7 @@
             sendCapture(x.dev, n, burstPayload(src, n, isA ? 3 : 0, isA ? 0 : 0.5, isA ? 0 : 20e3, isA ? 0 : 0.6 + 0.05 * (Math.random() - 0.5)), 1234);
           }
         }
-        return this.send(hw ? 'REFTX 1 -760 70\n' : `REFTX 1 ${+m[3]} ${+m[3] + 830}\n`);
+        return this.send(hw ? 'REFTX 1 -760 70\n' : `REFTX 1 ${+m[3]} ${+m[3] + 800}\n`);
       }
       this.send('ERR command\n');
     }
